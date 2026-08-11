@@ -1,0 +1,26 @@
+/.gradle/
+/build/
+/app/build/
+/local.properties
+/.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Workspace-only files
+/AGENTS.md
+/sources/
+/.agents/
+/.codex/
+
+# Local previews and packaged builds
+/*.apk
+/*.aab
+/*.idsig
+/the-system-*.png
+
+# Signing material must never be committed
+*.jks
+*.keystore
+keystore.properties
