@@ -13,18 +13,28 @@ import com.personal.thesystem.ui.SystemApp
 import com.personal.thesystem.ui.theme.TheSystemTheme
 
 class MainActivity : ComponentActivity() {
+    private lateinit var repository: SystemRepository
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
-        ReminderScheduler.createChannel(this)
+        repository = SystemRepository(applicationContext)
+        ReminderScheduler.scheduleAll(this, repository.settings)
         setContent {
             TheSystemTheme {
-                val repository = remember { SystemRepository(applicationContext) }
-                SystemApp(repository)
+                SystemApp(remember { repository })
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::repository.isInitialized) {
+            repository.reload()
+            ReminderScheduler.scheduleAll(this, repository.settings)
         }
     }
 }

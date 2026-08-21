@@ -11,6 +11,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 val Ink = Color(0xFF090A0C)
+val MorningInk = Color(0xFF0D141A)
+val NightInk = Color(0xFF050608)
 val Surface = Color(0xFF111317)
 val SurfaceRaised = Color(0xFF171A1F)
 val SurfaceSoft = Color(0xFF1D2026)

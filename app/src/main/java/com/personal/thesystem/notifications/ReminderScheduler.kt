@@ -6,7 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import com.personal.thesystem.data.SystemRepository
 import com.personal.thesystem.model.SystemSettings
 import java.time.LocalDateTime
@@ -18,15 +20,26 @@ enum class ReminderType(
     val title: String,
     val message: String,
 ) {
-    WARNING(401, "Скоро цифровой отбой", "15 минут. Заверши последнее видео или игру — не начинай новое."),
-    CUTOFF(402, "22:45 · Цифровой отбой", "Закрой ноутбук. Телефон — на зарядку вне спальни."),
-    PREPARATION(403, "Подготовка ко сну", "Душ, зубы, одежда на утро. Экранов больше нет."),
-    BED(404, "23:30 · В кровати", "Свет выключен. Сегодняшнее решение уже принято."),
-    MORNING(405, "Утренний триггер", "Встал — сразу отжимания. Отметь результат в The System."),
+    WARNING(401, "Скоро пора завершать день", "Через 15 минут цифровой отбой. Спокойно закончи текущее и оставь новое на завтра."),
+    CUTOFF(402, "Пора отдохнуть от экранов", "Закрой ноутбук и поставь телефон на зарядку. На сегодня ты уже сделал достаточно."),
+    PREPARATION(403, "Немного заботы о себе", "Подготовься ко сну без спешки: душ, зубы и вещи на утро. Пусть вечер закончится спокойно."),
+    BED(404, "Время отдыхать", "Ложись в кровать и выключай свет. Завтра будет новый день. Спокойной ночи!"),
+    MORNING(405, "Доброе утро!", "Начни день с отжиманий в своём темпе, а потом отметь результат. У тебя получится!"),
+    DIET(406, "Как прошло питание сегодня?", "Загляни в The System и отметь «ДА» или «НЕТ»: без сладкого и без чипсов. Газировку можно."),
 }
 
 object ReminderScheduler {
     const val CHANNEL_ID = "system_reminders"
+
+    fun canScheduleExactly(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
+
+    fun exactAlarmPermissionIntent(context: Context): Intent =
+        Intent(
+            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+            Uri.parse("package:${context.packageName}"),
+        )
 
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -37,7 +50,7 @@ object ReminderScheduler {
                     "Напоминания Системы",
                     NotificationManager.IMPORTANCE_HIGH,
                 ).apply {
-                    description = "Цифровой отбой, подготовка ко сну и утренние отжимания"
+                    description = "Питание, цифровой отбой, подготовка ко сну и утренние отжимания"
                     enableVibration(true)
                 }
             )
@@ -54,6 +67,7 @@ object ReminderScheduler {
         if (settings.preparationEnabled) schedule(context, ReminderType.PREPARATION, settings.bedTime.minusMinutes(30))
         if (settings.bedEnabled) schedule(context, ReminderType.BED, settings.bedTime)
         if (settings.morningEnabled) schedule(context, ReminderType.MORNING, settings.morningTime)
+        if (settings.dietEnabled) schedule(context, ReminderType.DIET, settings.dietTime)
     }
 
     private fun schedule(context: Context, type: ReminderType, time: LocalTime) {
@@ -64,7 +78,7 @@ object ReminderScheduler {
         if (!next.isAfter(now)) next = next.plusDays(1)
         val triggerAt = next.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+        if (!canScheduleExactly(context)) {
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
         } else {
             alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)

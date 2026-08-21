@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
@@ -27,8 +28,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -47,6 +51,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -68,10 +73,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -90,10 +97,16 @@ import androidx.core.content.ContextCompat
 import com.personal.thesystem.R
 import com.personal.thesystem.data.SystemRepository
 import com.personal.thesystem.model.DailyRecord
+import com.personal.thesystem.model.DailyTask
 import com.personal.thesystem.model.DecisionStatus
+import com.personal.thesystem.model.DietViolationReason
+import com.personal.thesystem.model.ExperimentFeedback
+import com.personal.thesystem.model.LightPlanState
 import com.personal.thesystem.model.SystemLogic
 import com.personal.thesystem.model.SystemSettings
 import com.personal.thesystem.model.ViolationReason
+import com.personal.thesystem.model.WeeklyExperiment
+import com.personal.thesystem.model.WeeklyReport
 import com.personal.thesystem.notifications.ReminderScheduler
 import com.personal.thesystem.ui.theme.Acid
 import com.personal.thesystem.ui.theme.Amber
@@ -101,6 +114,8 @@ import com.personal.thesystem.ui.theme.Danger
 import com.personal.thesystem.ui.theme.Hairline
 import com.personal.thesystem.ui.theme.Ink
 import com.personal.thesystem.ui.theme.Muted
+import com.personal.thesystem.ui.theme.MorningInk
+import com.personal.thesystem.ui.theme.NightInk
 import com.personal.thesystem.ui.theme.Paper
 import com.personal.thesystem.ui.theme.SurfaceRaised
 import com.personal.thesystem.ui.theme.SurfaceSoft
@@ -114,6 +129,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -129,7 +145,7 @@ private enum class AppTab(val label: String) {
     SETTINGS("Настройки"),
 }
 
-private enum class DecisionKind { SLEEP, MORNING }
+private enum class DecisionKind { SLEEP, DIET, WATER, LIGHT, MORNING }
 
 private data class ConfettiParticle(
     val x: Float,
@@ -139,7 +155,11 @@ private data class ConfettiParticle(
     val phase: Float,
     val rotation: Float,
     val colorIndex: Int,
-    val round: Boolean,
+    val shape: Int,
+    val scale: Float,
+    val drift: Float,
+    val spin: Float,
+    val speed: Float,
 )
 
 private data class EmojiParticle(
@@ -152,6 +172,17 @@ private data class EmojiParticle(
     val scale: Float,
 )
 
+private data class SuccessEmojiParticle(
+    val x: Float,
+    val startY: Float,
+    val delay: Float,
+    val sway: Float,
+    val phase: Float,
+    val rotation: Float,
+    val scale: Float,
+    val symbolIndex: Int,
+)
+
 @Composable
 fun SystemApp(repository: SystemRepository) {
     val context = LocalContext.current
@@ -160,33 +191,69 @@ fun SystemApp(repository: SystemRepository) {
     var pendingReason by remember { mutableStateOf<Pair<LocalDate, DecisionKind>?>(null) }
     var emojiAfterReason by remember { mutableStateOf(false) }
     var confettiBurst by remember { mutableIntStateOf(0) }
+    var celebrationKind by remember { mutableStateOf(DecisionKind.MORNING) }
     var emojiBurst by remember { mutableIntStateOf(0) }
+    var exactAlarmsAllowed by remember { mutableStateOf(ReminderScheduler.canScheduleExactly(context)) }
+    var currentTime by remember { mutableStateOf(LocalTime.now()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            currentTime = LocalTime.now()
+        }
+    }
+    val targetBackground = when {
+        !currentTime.isBefore(repository.settings.digitalCutoff) -> NightInk
+        currentTime.hour < 12 -> MorningInk
+        else -> Ink
+    }
+    val appBackground by animateColorAsState(targetBackground, tween(900), label = "dayBackground")
 
     fun applySettings(transform: (SystemSettings) -> SystemSettings) {
         repository.updateSettings(transform)
         ReminderScheduler.scheduleAll(context, repository.settings)
     }
 
+    val exactAlarmLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        exactAlarmsAllowed = ReminderScheduler.canScheduleExactly(context)
+        ReminderScheduler.scheduleAll(context, repository.settings)
+    }
+
+    fun requestExactAlarmAccess() {
+        if (ReminderScheduler.canScheduleExactly(context)) {
+            exactAlarmsAllowed = true
+            ReminderScheduler.scheduleAll(context, repository.settings)
+        } else {
+            exactAlarmLauncher.launch(ReminderScheduler.exactAlarmPermissionIntent(context))
+        }
+    }
+
+    fun activateNotifications(granted: Boolean) {
+        applySettings { it.copy(notificationsEnabled = granted) }
+        if (granted) requestExactAlarmAccess()
+    }
+
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        applySettings { it.copy(notificationsEnabled = granted) }
-    }
+    ) { granted -> activateNotifications(granted) }
 
     fun enableNotifications() {
         val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         if (needsPermission) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        else applySettings { it.copy(notificationsEnabled = true) }
+        else activateNotifications(true)
     }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
-            containerColor = Ink,
+            containerColor = appBackground,
             bottomBar = {
                 SystemBottomBar(
                     selected = selectedTab,
                     onSelect = { selectedTab = it },
+                    background = appBackground,
                 )
             }
         ) { insets ->
@@ -203,31 +270,78 @@ fun SystemApp(repository: SystemRepository) {
                 when (tab) {
                     AppTab.TODAY -> TodayScreen(
                         repository = repository,
+                        currentTime = currentTime,
                         onNo = { kind ->
-                            emojiAfterReason = true
-                            pendingReason = LocalDate.now() to kind
+                            when (kind) {
+                                DecisionKind.MORNING -> {
+                                    repository.setMorning(LocalDate.now(), DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                DecisionKind.LIGHT -> {
+                                    repository.setLight(LocalDate.now(), DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                DecisionKind.WATER -> {
+                                    repository.setWater(LocalDate.now(), DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                else -> {
+                                    emojiAfterReason = true
+                                    pendingReason = LocalDate.now() to kind
+                                }
+                            }
                         },
-                        onCelebrate = { confettiBurst += 1 },
+                        onCelebrate = { kind ->
+                            celebrationKind = kind
+                            confettiBurst += 1
+                        },
                         onEnableNotifications = ::enableNotifications,
+                        exactAlarmsAllowed = exactAlarmsAllowed,
                     )
                     AppTab.HISTORY -> HistoryScreen(
                         repository = repository,
                         onNo = { date, kind ->
-                            emojiAfterReason = false
-                            pendingReason = date to kind
+                            when (kind) {
+                                DecisionKind.MORNING -> {
+                                    repository.setMorning(date, DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                DecisionKind.LIGHT -> {
+                                    repository.setLight(date, DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                DecisionKind.WATER -> {
+                                    repository.setWater(date, DecisionStatus.NO)
+                                    emojiBurst += 1
+                                }
+                                else -> {
+                                    emojiAfterReason = true
+                                    pendingReason = date to kind
+                                }
+                            }
+                        },
+                        onCelebrate = { kind ->
+                            celebrationKind = kind
+                            confettiBurst += 1
                         },
                     )
                     AppTab.STATS -> StatsScreen(repository)
                     AppTab.SETTINGS -> SettingsScreen(
                         settings = repository.settings,
+                        records = repository.records.values,
                         onUpdate = ::applySettings,
                         onEnableNotifications = ::enableNotifications,
+                        exactAlarmsAllowed = exactAlarmsAllowed,
                     )
                 }
             }
         }
-        ConfettiBurst(confettiBurst, Modifier.fillMaxSize().zIndex(20f))
-        EmojiRain(emojiBurst, Modifier.fillMaxSize().zIndex(21f))
+        if (celebrationKind == DecisionKind.SLEEP) {
+            ConfettiBurst(confettiBurst, Modifier.fillMaxSize().zIndex(20f))
+        } else {
+            SuccessEmojiBurst(confettiBurst, celebrationKind, Modifier.fillMaxSize().zIndex(21f))
+        }
+        EmojiRain(emojiBurst, Modifier.fillMaxSize().zIndex(22f))
     }
 
     pendingReason?.let { (date, kind) ->
@@ -238,8 +352,13 @@ fun SystemApp(repository: SystemRepository) {
                 pendingReason = null
             },
             onReason = { reason ->
-                if (kind == DecisionKind.SLEEP) repository.setSleep(date, DecisionStatus.NO, reason)
-                else repository.setMorning(date, DecisionStatus.NO, reason)
+                when (kind) {
+                    DecisionKind.SLEEP -> repository.setSleep(date, DecisionStatus.NO, ViolationReason.fromId(reason))
+                    DecisionKind.DIET -> repository.setDiet(date, DecisionStatus.NO, DietViolationReason.fromId(reason))
+                    DecisionKind.LIGHT -> repository.setLight(date, DecisionStatus.NO)
+                    DecisionKind.WATER -> repository.setWater(date, DecisionStatus.NO)
+                    DecisionKind.MORNING -> repository.setMorning(date, DecisionStatus.NO)
+                }
                 val shouldLaunchEmoji = emojiAfterReason
                 emojiAfterReason = false
                 pendingReason = null
@@ -260,16 +379,21 @@ private fun ConfettiBurst(burstId: Int, modifier: Modifier = Modifier) {
     val particles = remember(burstId) {
         if (burstId == 0) emptyList() else {
             val random = Random(burstId * 7919)
-            List(88) { index ->
+            List(156) { index ->
+                val wave = index % 3
                 ConfettiParticle(
                     x = random.nextFloat(),
-                    startY = -0.18f + random.nextFloat() * 0.13f,
-                    delay = random.nextFloat() * 0.32f,
-                    sway = 0.025f + random.nextFloat() * 0.07f,
+                    startY = -0.22f + random.nextFloat() * 0.16f,
+                    delay = wave * 0.17f + random.nextFloat() * 0.14f,
+                    sway = 0.015f + random.nextFloat() * 0.075f,
                     phase = random.nextFloat() * 6.283f,
                     rotation = random.nextFloat() * 540f - 270f,
-                    colorIndex = index % 5,
-                    round = index % 6 == 0,
+                    colorIndex = index % 8,
+                    shape = index % 5,
+                    scale = 0.65f + random.nextFloat() * 0.9f,
+                    drift = random.nextFloat() * 0.22f - 0.11f,
+                    spin = (480f + random.nextFloat() * 1080f) * if (index % 2 == 0) 1f else -1f,
+                    speed = 0.9f + random.nextFloat() * 0.28f,
                 )
             }
         }
@@ -280,7 +404,7 @@ private fun ConfettiBurst(burstId: Int, modifier: Modifier = Modifier) {
             animation.snapTo(0f)
             animation.animateTo(
                 targetValue = 1f,
-                animationSpec = tween(durationMillis = 1900, easing = LinearEasing),
+                animationSpec = tween(durationMillis = 3300, easing = LinearEasing),
             )
         }
     }
@@ -293,37 +417,191 @@ private fun ConfettiBurst(burstId: Int, modifier: Modifier = Modifier) {
         Color(0xFF9EB6C2),
         Color(0xFF78838D),
         Danger,
+        Color(0xFFB8A7FF),
+        Color(0xFF7BDFF2),
+        Color(0xFFFF8FAB),
     )
 
     Canvas(modifier) {
-        val pieceWidth = 6.dp.toPx()
-        val pieceHeight = 13.dp.toPx()
+        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height * 0.45f)
+        val firstPulse = (progress / 0.28f).coerceIn(0f, 1f)
+        if (firstPulse < 1f) {
+            drawCircle(
+                Acid.copy(alpha = (1f - firstPulse) * 0.20f),
+                radius = size.minDimension * (0.08f + firstPulse * 0.56f),
+                center = center,
+            )
+            drawCircle(
+                Paper.copy(alpha = (1f - firstPulse) * 0.72f),
+                radius = size.minDimension * (0.05f + firstPulse * 0.42f),
+                center = center,
+                style = Stroke(2.dp.toPx()),
+            )
+        }
+
+        val secondPulse = ((progress - 0.13f) / 0.30f).coerceIn(0f, 1f)
+        if (secondPulse > 0f && secondPulse < 1f) {
+            drawCircle(
+                Color(0xFF7BDFF2).copy(alpha = (1f - secondPulse) * 0.42f),
+                radius = size.minDimension * (0.12f + secondPulse * 0.50f),
+                center = center,
+                style = Stroke(1.5.dp.toPx()),
+            )
+        }
+
         particles.forEach { particle ->
             val localProgress = ((progress - particle.delay) / (1f - particle.delay)).coerceIn(0f, 1f)
             if (localProgress <= 0f || localProgress >= 1f) return@forEach
 
-            val alpha = if (localProgress < 0.82f) 1f else (1f - localProgress) / 0.18f
+            val pieceWidth = 6.dp.toPx() * particle.scale
+            val pieceHeight = 14.dp.toPx() * particle.scale
+            val alpha = if (localProgress < 0.78f) 1f else (1f - localProgress) / 0.22f
             val x = particle.x * size.width +
-                sin(localProgress * 10f + particle.phase) * particle.sway * size.width
+                sin(localProgress * 11f + particle.phase) * particle.sway * size.width +
+                particle.drift * localProgress * size.width
             val startY = particle.startY * size.height
-            val y = startY + localProgress * (size.height - startY + pieceHeight)
+            val y = startY + localProgress * particle.speed * (size.height - startY + pieceHeight)
             val color = palette[particle.colorIndex].copy(alpha = alpha.coerceIn(0f, 1f))
+            val pivot = androidx.compose.ui.geometry.Offset(x, y)
 
-            if (particle.round) {
-                drawCircle(color, radius = pieceWidth * 0.55f, center = androidx.compose.ui.geometry.Offset(x, y))
-            } else {
-                rotate(
-                    degrees = particle.rotation + localProgress * 720f,
-                    pivot = androidx.compose.ui.geometry.Offset(x, y),
-                ) {
-                    drawRoundRect(
+            rotate(degrees = particle.rotation + localProgress * particle.spin, pivot = pivot) {
+                when (particle.shape) {
+                    0 -> {
+                        drawRoundRect(
+                            color = color,
+                            topLeft = androidx.compose.ui.geometry.Offset(x - pieceWidth / 2f, y - pieceHeight / 2f),
+                            size = androidx.compose.ui.geometry.Size(pieceWidth, pieceHeight),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(pieceWidth / 3f),
+                        )
+                    }
+                    1 -> drawCircle(color, radius = pieceWidth * 0.58f, center = pivot)
+                    2 -> drawLine(
                         color = color,
-                        topLeft = androidx.compose.ui.geometry.Offset(x - pieceWidth / 2f, y - pieceHeight / 2f),
-                        size = androidx.compose.ui.geometry.Size(pieceWidth, pieceHeight),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(pieceWidth / 3f),
+                        start = androidx.compose.ui.geometry.Offset(x, y - pieceHeight / 2f),
+                        end = androidx.compose.ui.geometry.Offset(x, y + pieceHeight / 2f),
+                        strokeWidth = pieceWidth * 0.72f,
+                        cap = StrokeCap.Round,
+                    )
+                    3 -> {
+                        drawLine(color, androidx.compose.ui.geometry.Offset(x - pieceWidth, y), androidx.compose.ui.geometry.Offset(x + pieceWidth, y), pieceWidth * 0.38f, StrokeCap.Round)
+                        drawLine(color, androidx.compose.ui.geometry.Offset(x, y - pieceWidth), androidx.compose.ui.geometry.Offset(x, y + pieceWidth), pieceWidth * 0.38f, StrokeCap.Round)
+                    }
+                    else -> drawCircle(
+                        color = color,
+                        radius = pieceWidth * 0.72f,
+                        center = pivot,
+                        style = Stroke(pieceWidth * 0.28f),
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SuccessEmojiBurst(burstId: Int, kind: DecisionKind, modifier: Modifier = Modifier) {
+    val animation = remember { Animatable(1f) }
+    val symbols = remember(kind) {
+        when (kind) {
+            DecisionKind.MORNING -> listOf("💪")
+            DecisionKind.LIGHT -> listOf("📷")
+            DecisionKind.DIET -> listOf("😏", "😁")
+            DecisionKind.WATER -> listOf("🧊", "💧")
+            DecisionKind.SLEEP -> listOf("❤️", "😏")
+        }
+    }
+    val particles = remember(burstId, kind) {
+        if (burstId == 0) emptyList() else {
+            val random = Random(burstId * 65537 + kind.ordinal * 257)
+            val count = when (kind) {
+                DecisionKind.LIGHT -> 26
+                DecisionKind.WATER, DecisionKind.SLEEP -> 42
+                else -> 34
+            }
+            List(count) { index ->
+                SuccessEmojiParticle(
+                    x = random.nextFloat(),
+                    startY = random.nextFloat(),
+                    delay = random.nextFloat() * 0.38f,
+                    sway = 0.025f + random.nextFloat() * 0.07f,
+                    phase = random.nextFloat() * 6.283f,
+                    rotation = random.nextFloat() * 50f - 25f,
+                    scale = 0.72f + random.nextFloat() * 0.85f,
+                    symbolIndex = index % symbols.size,
+                )
+            }
+        }
+    }
+    val paint = remember {
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = android.graphics.Paint.Align.CENTER
+            color = android.graphics.Color.WHITE
+        }
+    }
+
+    LaunchedEffect(burstId) {
+        if (burstId > 0) {
+            animation.snapTo(0f)
+            animation.animateTo(1f, tween(durationMillis = 3300, easing = LinearEasing))
+        }
+    }
+
+    val progress = animation.value
+    if (burstId == 0 || progress >= 1f) return
+
+    Canvas(modifier) {
+        if (kind == DecisionKind.LIGHT) {
+            val flash = listOf(0.18f, 0.40f, 0.62f, 0.82f).maxOf { moment ->
+                (1f - abs(progress - moment) / 0.035f).coerceIn(0f, 1f)
+            }
+            if (flash > 0f) drawRect(Color.White.copy(alpha = flash * 0.58f))
+        }
+
+        particles.forEach { particle ->
+            val localProgress = ((progress - particle.delay) / (1f - particle.delay)).coerceIn(0f, 1f)
+            if (localProgress <= 0f || localProgress >= 1f) return@forEach
+
+            val entrance = (localProgress / 0.12f).coerceIn(0f, 1f)
+            val exit = ((1f - localProgress) / 0.18f).coerceIn(0f, 1f)
+            val alpha = entrance * exit
+            val x = particle.x * size.width +
+                sin(localProgress * 9f + particle.phase) * particle.sway * size.width +
+                if (kind == DecisionKind.SLEEP) localProgress * size.width * 0.12f else 0f
+            val y = when (kind) {
+                DecisionKind.MORNING, DecisionKind.DIET ->
+                    size.height * (1.08f - particle.startY * 0.28f - localProgress * 1.16f)
+                DecisionKind.LIGHT ->
+                    size.height * (0.12f + particle.startY * 0.76f) + sin(localProgress * 10f + particle.phase) * 12.dp.toPx()
+                DecisionKind.WATER ->
+                    size.height * (-0.18f + particle.startY * 0.22f + localProgress * 1.28f)
+                DecisionKind.SLEEP ->
+                    size.height * (0.05f + particle.startY * 0.76f + localProgress * 0.24f)
+            }
+            val pulse = if (kind == DecisionKind.LIGHT) {
+                0.86f + sin(localProgress * 24f + particle.phase) * 0.14f
+            } else {
+                1f
+            }
+            val textSize = 38.dp.toPx() * particle.scale * entrance * pulse
+            val nativeCanvas = drawContext.canvas.nativeCanvas
+
+            if (kind == DecisionKind.LIGHT) {
+                val cameraFlash = (1f - abs((localProgress * 3f % 1f) - 0.18f) / 0.055f).coerceIn(0f, 1f)
+                if (cameraFlash > 0f) {
+                    drawCircle(
+                        Color.White.copy(alpha = cameraFlash * alpha * 0.72f),
+                        radius = textSize * 0.75f,
+                        center = androidx.compose.ui.geometry.Offset(x, y),
+                    )
+                }
+            }
+
+            paint.textSize = textSize
+            paint.alpha = (alpha * 255f).roundToInt().coerceIn(0, 255)
+            nativeCanvas.save()
+            nativeCanvas.rotate(particle.rotation + sin(localProgress * 8f + particle.phase) * 12f, x, y)
+            nativeCanvas.drawText(symbols[particle.symbolIndex], x, y + textSize * 0.34f, paint)
+            nativeCanvas.restore()
         }
     }
 }
@@ -398,12 +676,12 @@ private fun EmojiRain(burstId: Int, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun SystemBottomBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
+private fun SystemBottomBar(selected: AppTab, onSelect: (AppTab) -> Unit, background: Color) {
     val haptics = LocalHapticFeedback.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Ink.copy(alpha = 0.98f))
+            .background(background.copy(alpha = 0.98f))
             .border(1.dp, Hairline.copy(alpha = 0.65f))
             .navigationBarsPadding()
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -494,15 +772,30 @@ private fun ScreenHeader(eyebrow: String, title: String, detail: String? = null)
 @Composable
 private fun TodayScreen(
     repository: SystemRepository,
+    currentTime: LocalTime,
     onNo: (DecisionKind) -> Unit,
-    onCelebrate: () -> Unit,
+    onCelebrate: (DecisionKind) -> Unit,
     onEnableNotifications: () -> Unit,
+    exactAlarmsAllowed: Boolean,
 ) {
     val today = LocalDate.now()
     val record = repository.recordFor(today)
     val settings = repository.settings
-    val admission = SystemLogic.admissionFor(today, settings.admissionStart)
-    val answered = listOf(record.sleep, record.morning).count { it != null }
+    var expandedCompleted by remember(today) { mutableStateOf(emptySet<DailyTask>()) }
+    val admission = SystemLogic.admissionFor(today, settings.admissionStart, repository.records.values)
+    val lightPlan = SystemLogic.lightPlanFor(today, settings.lightStart)
+    val experiment = if (SystemLogic.experimentAvailableOn(today)) {
+        SystemLogic.weeklyExperiment(today, repository.records.values, repository.experimentFeedback)
+    } else {
+        null
+    }
+    val answered = listOf(record.morning, record.light, record.diet, record.water, record.sleep).count { it != null }
+    val currentTask = SystemLogic.currentTask(record, currentTime, settings.digitalCutoff)
+    val recoveryTask = SystemLogic.recoveryTask(record, currentTime, settings.digitalCutoff)
+
+    fun toggleCompleted(task: DailyTask) {
+        expandedCompleted = if (task in expandedCompleted) expandedCompleted - task else expandedCompleted + task
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().statusBarsPadding(),
@@ -512,14 +805,160 @@ private fun TodayScreen(
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
                 ScreenHeader("The System", today.format(DayFormatter).replaceFirstChar { it.uppercase() })
-                SystemMark(answered / 2f)
+                SystemMark(answered / 5f)
             }
         }
 
         item { DailyStatement(answered, record) }
 
-        if (!settings.notificationsEnabled) {
-            item { ReminderPermissionCard(onEnableNotifications) }
+        if (settings.hseModeEnabled && today.dayOfWeek in DayOfWeek.MONDAY..DayOfWeek.FRIDAY) {
+            item {
+                HseModeCard(
+                    settings = settings,
+                    currentTime = currentTime,
+                    task = record.studyTask,
+                    onTaskChange = { repository.setStudyTask(today, it) },
+                )
+            }
+        }
+
+        recoveryTask?.let { task ->
+            item { RecoveryCard(task) }
+        }
+
+        experiment?.let { weeklyExperiment ->
+            item {
+                WeeklyExperimentCard(
+                    experiment = weeklyExperiment,
+                    feedback = repository.experimentFeedback[weeklyExperiment.weekStart],
+                    canReview = today.dayOfWeek == DayOfWeek.SATURDAY || today.dayOfWeek == DayOfWeek.SUNDAY,
+                    onFeedback = { repository.setExperimentFeedback(weeklyExperiment.weekStart, it) },
+                )
+            }
+        }
+
+        if (!settings.notificationsEnabled || !exactAlarmsAllowed) {
+            item {
+                ReminderPermissionCard(
+                    title = if (settings.notificationsEnabled) "Разрешить точное время" else "Включить напоминания",
+                    detail = if (settings.notificationsEnabled) {
+                        "Чтобы Android присылал их вовремя, даже когда приложение закрыто"
+                    } else {
+                        "Отбой, подготовка ко сну и утренний триггер"
+                    },
+                    onEnable = onEnableNotifications,
+                )
+            }
+        }
+
+        item {
+            SectionLabel("УТРО", if (admission.completed) "РЕЖИМ 20" else "УРОВЕНЬ ${admission.level}/${admission.totalLevels}")
+            Spacer(Modifier.height(8.dp))
+            DecisionCard(
+                title = "УТРО",
+                number = "01",
+                description = if (admission.completed) {
+                    "Сразу после пробуждения — 20 отжиманий."
+                } else {
+                    "Сразу после пробуждения — ${admission.target} ${pushupWord(admission.target)}."
+                },
+                status = record.morning,
+                reasonLabel = record.morningReason?.label,
+                onYes = {
+                    if (SystemLogic.toggledDecision(record.morning, DecisionStatus.YES) == null) {
+                        repository.clearMorning(today)
+                    } else {
+                        expandedCompleted -= DailyTask.MORNING
+                        repository.setMorning(today, DecisionStatus.YES)
+                        onCelebrate(DecisionKind.MORNING)
+                    }
+                },
+                onNo = {
+                    if (SystemLogic.toggledDecision(record.morning, DecisionStatus.NO) == null) repository.clearMorning(today)
+                    else onNo(DecisionKind.MORNING)
+                },
+                collapsed = record.morning == DecisionStatus.YES && DailyTask.MORNING !in expandedCompleted,
+                current = currentTask == DailyTask.MORNING,
+                onToggleCollapsed = { toggleCompleted(DailyTask.MORNING) },
+                footer = {
+                    AdmissionProgress(admission.target, admission.level, admission.totalLevels, admission.completed)
+                },
+            )
+        }
+
+        item {
+            SectionLabel("СВЕТ", if (lightPlan.completed) "РЕЖИМ ЗАКРЕПЛЁН" else "ДЕНЬ ${lightPlan.day}/${lightPlan.totalDays}")
+            Spacer(Modifier.height(8.dp))
+            DecisionCard(
+                title = "ПРИВЫКАНИЕ К СВЕТУ",
+                number = "02",
+                description = lightPlan.task,
+                status = record.light,
+                reasonLabel = null,
+                onYes = {
+                    if (SystemLogic.toggledDecision(record.light, DecisionStatus.YES) == null) {
+                        repository.clearLight(today)
+                    } else {
+                        expandedCompleted -= DailyTask.LIGHT
+                        repository.setLight(today, DecisionStatus.YES)
+                        onCelebrate(DecisionKind.LIGHT)
+                    }
+                },
+                onNo = {
+                    if (SystemLogic.toggledDecision(record.light, DecisionStatus.NO) == null) repository.clearLight(today)
+                    else onNo(DecisionKind.LIGHT)
+                },
+                collapsed = record.light == DecisionStatus.YES && DailyTask.LIGHT !in expandedCompleted,
+                current = currentTask == DailyTask.LIGHT,
+                onToggleCollapsed = { toggleCompleted(DailyTask.LIGHT) },
+                footer = { LightPlanProgress(lightPlan) },
+            )
+        }
+
+        item {
+            SectionLabel("ДЕНЬ", "БЕЗ СЛАДКОГО И БЕЗ ЧИПСОВ")
+            Spacer(Modifier.height(8.dp))
+            DecisionCard(
+                title = "I'm on a diet",
+                number = "03",
+                description = "День без сладкого и без чипсов. Газировку можно.",
+                status = record.diet,
+                reasonLabel = record.dietReason?.label,
+                onYes = {
+                    if (SystemLogic.toggledDecision(record.diet, DecisionStatus.YES) == null) {
+                        repository.clearDiet(today)
+                    } else {
+                        expandedCompleted -= DailyTask.DIET
+                        repository.setDiet(today, DecisionStatus.YES)
+                        onCelebrate(DecisionKind.DIET)
+                    }
+                },
+                onNo = {
+                    if (SystemLogic.toggledDecision(record.diet, DecisionStatus.NO) == null) repository.clearDiet(today)
+                    else onNo(DecisionKind.DIET)
+                },
+                collapsed = record.diet == DecisionStatus.YES && DailyTask.DIET !in expandedCompleted,
+                current = currentTask == DailyTask.DIET,
+                onToggleCollapsed = { toggleCompleted(DailyTask.DIET) },
+            )
+        }
+
+        item {
+            SectionLabel("ВОДА", "2,5 ЛИТРА")
+            Spacer(Modifier.height(8.dp))
+            WaterCard(
+                quarters = SystemLogic.waterQuarters(record) ?: 0,
+                onMinus = { repository.adjustWater(today, -1) },
+                onPlus = {
+                    if (repository.adjustWater(today, 1)) {
+                        expandedCompleted -= DailyTask.WATER
+                        onCelebrate(DecisionKind.WATER)
+                    }
+                },
+                collapsed = record.water == DecisionStatus.YES && DailyTask.WATER !in expandedCompleted,
+                current = currentTask == DailyTask.WATER,
+                onToggleCollapsed = { toggleCompleted(DailyTask.WATER) },
+            )
         }
 
         item {
@@ -527,39 +966,26 @@ private fun TodayScreen(
             Spacer(Modifier.height(8.dp))
             DecisionCard(
                 title = "СОН",
-                number = "01",
+                number = "05",
                 description = "Цифровой отбой в ${SystemLogic.formatTime(settings.digitalCutoff)}. В кровати в ${SystemLogic.formatTime(settings.bedTime)}.",
                 status = record.sleep,
-                reason = record.sleepReason,
+                reasonLabel = record.sleepReason?.label,
                 onYes = {
-                    repository.setSleep(today, DecisionStatus.YES)
-                    onCelebrate()
+                    if (SystemLogic.toggledDecision(record.sleep, DecisionStatus.YES) == null) {
+                        repository.clearSleep(today)
+                    } else {
+                        expandedCompleted -= DailyTask.SLEEP
+                        repository.setSleep(today, DecisionStatus.YES)
+                        onCelebrate(DecisionKind.SLEEP)
+                    }
                 },
-                onNo = { onNo(DecisionKind.SLEEP) },
-            )
-        }
-
-        item {
-            SectionLabel("УТРО", if (admission.completed) "РЕЖИМ 20" else "ДОПУСК ${admission.day}/${admission.totalDays}")
-            Spacer(Modifier.height(8.dp))
-            DecisionCard(
-                title = "УТРО",
-                number = "02",
-                description = if (admission.completed) {
-                    "Сразу после пробуждения — 20 отжиманий подряд."
-                } else {
-                    "Сегодня ${admission.target} ${pushupWord(admission.target)} подряд. Сразу после пробуждения."
+                onNo = {
+                    if (SystemLogic.toggledDecision(record.sleep, DecisionStatus.NO) == null) repository.clearSleep(today)
+                    else onNo(DecisionKind.SLEEP)
                 },
-                status = record.morning,
-                reason = record.morningReason,
-                onYes = {
-                    repository.setMorning(today, DecisionStatus.YES)
-                    onCelebrate()
-                },
-                onNo = { onNo(DecisionKind.MORNING) },
-                footer = {
-                    AdmissionProgress(admission.target, admission.day, admission.totalDays, admission.completed)
-                },
+                collapsed = record.sleep == DecisionStatus.YES && DailyTask.SLEEP !in expandedCompleted,
+                current = currentTask == DailyTask.SLEEP,
+                onToggleCollapsed = { toggleCompleted(DailyTask.SLEEP) },
             )
         }
 
@@ -587,19 +1013,17 @@ private fun SystemMark(progress: Float) {
 
 @Composable
 private fun DailyStatement(answered: Int, record: DailyRecord) {
-    val failures = listOf(record.sleep, record.morning).count { it == DecisionStatus.NO }
+    val failures = listOf(record.morning, record.light, record.diet, record.water, record.sleep).count { it == DecisionStatus.NO }
     val label = when {
-        answered == 0 -> "ДВА РЕШЕНИЯ.\nБЕЗ ПЕРЕГОВОРОВ."
-        answered < 2 -> "ОДНО РЕШЕНИЕ\nОСТАЛОСЬ."
+        answered == 0 -> "ПЯТЬ ЗАДАЧ -\nОДИН ДЕНЬ"
+        answered == 1 -> "ПЕРВАЯ ЧАСТЬ\nГОТОВА"
+        answered == 2 -> "ДВЕ ЧАСТИ\nГОТОВЫ"
+        answered == 3 -> "ПОЛДЕЛА\nСДЕЛАНО"
+        answered == 4 -> "ПОЧТИ\nГОТОВО"
         failures == 0 -> "ДЕНЬ\nЗАКРЫТ."
         else -> "НАРУШЕНИЯ\nУСТАНОВЛЕНЫ"
     }
-    val supporting = when {
-        answered == 0 -> "Отметь факты. Система не требует идеальности — только честности."
-        answered < 2 -> "Первый факт записан. Закрой вторую часть дня."
-        failures == 0 -> "Оба правила соблюдены. Никаких очков и серий — только выполненный стандарт."
-        else -> "Нарушение не обнуляет систему. Причина записана, следующий выбор остаётся твоим."
-    }
+    val supporting = SystemLogic.contextualPhrase(record)
     Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         Text(label, color = Paper, style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(12.dp))
@@ -608,7 +1032,115 @@ private fun DailyStatement(answered: Int, record: DailyRecord) {
 }
 
 @Composable
-private fun ReminderPermissionCard(onEnable: () -> Unit) {
+private fun RecoveryCard(task: DailyTask) {
+    PremiumCard(color = SurfaceSoft, border = Acid.copy(alpha = .28f)) {
+        Text("РЕЖИМ ВОССТАНОВЛЕНИЯ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+        Spacer(Modifier.height(10.dp))
+        Text("День не потерян.", color = Paper, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(5.dp))
+        Text("Следующее действие — ${task.recoveryAction.replaceFirstChar { it.lowercase() }}", color = Muted, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+private fun HseModeCard(
+    settings: SystemSettings,
+    currentTime: LocalTime,
+    task: String,
+    onTaskChange: (String) -> Unit,
+) {
+    val leaveTime = SystemLogic.hseLeaveTime(settings)
+    PremiumCard(color = Acid.copy(alpha = .075f), border = Acid.copy(alpha = .30f)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+            Column {
+                Text("РЕЖИМ ВШЭ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+                Spacer(Modifier.height(7.dp))
+                Text(SystemLogic.hseCountdown(currentTime, leaveTime), color = Paper, style = MaterialTheme.typography.titleLarge)
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("ПАРА ${SystemLogic.formatTime(settings.hseFirstClassTime)}", color = Paper, style = MaterialTheme.typography.labelMedium)
+                Text("ВЫХОД ${SystemLogic.formatTime(leaveTime)}", color = Muted, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        Spacer(Modifier.height(18.dp))
+        Text("ГЛАВНАЯ УЧЕБНАЯ ЗАДАЧА", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.1.sp)
+        Spacer(Modifier.height(8.dp))
+        BasicTextField(
+            value = task,
+            onValueChange = onTaskChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Paper),
+            cursorBrush = SolidColor(Acid),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(SurfaceSoft)
+                .padding(horizontal = 14.dp, vertical = 13.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (task.isBlank()) Text("Например: закрыть лабораторную", color = Muted, style = MaterialTheme.typography.bodyLarge)
+                    inner()
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun WeeklyExperimentCard(
+    experiment: WeeklyExperiment,
+    feedback: ExperimentFeedback?,
+    canReview: Boolean,
+    onFeedback: (ExperimentFeedback) -> Unit,
+) {
+    PremiumCard(color = Acid.copy(alpha = .08f), border = Acid.copy(alpha = .28f)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("ЭКСПЕРИМЕНТ НЕДЕЛИ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+            Text(if (experiment.continued) "ПРОДОЛЖЕНИЕ" else "7 ДНЕЙ", color = Muted, style = MaterialTheme.typography.labelMedium)
+        }
+        Spacer(Modifier.height(13.dp))
+        Text(experiment.focus.title, color = Paper, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(6.dp))
+        Text(experiment.focus.action, color = Muted, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(12.dp))
+        Text(experiment.basis, color = Paper.copy(alpha = .72f), style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider(color = Hairline)
+        Spacer(Modifier.height(14.dp))
+
+        if (feedback != null) {
+            Text("ИТОГ: ${feedback.label.uppercase(Ru)}", color = Acid, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.sp)
+        } else if (canReview) {
+            Text("ИТОГ НЕДЕЛИ", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.2.sp)
+            Spacer(Modifier.height(9.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ExperimentFeedback.entries.forEach { option ->
+                    val label = when (option) {
+                        ExperimentFeedback.HELPED -> "ПОМОГЛО"
+                        ExperimentFeedback.DID_NOT_HELP -> "НЕ ПОМОГЛО"
+                        ExperimentFeedback.CONTINUE -> "ПРОДОЛЖИТЬ"
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, Hairline, RoundedCornerShape(12.dp))
+                            .clickable(role = Role.Button) { onFeedback(option) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(label, color = Paper, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp, textAlign = TextAlign.Center)
+                    }
+                }
+            }
+        } else {
+            Text("Итог можно отметить в выходные.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun ReminderPermissionCard(title: String, detail: String, onEnable: () -> Unit) {
     PremiumCard(
         modifier = Modifier.clickable(onClick = onEnable),
         color = Acid.copy(alpha = 0.09f),
@@ -620,9 +1152,9 @@ private fun ReminderPermissionCard(onEnable: () -> Unit) {
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text("Включить напоминания", color = Paper, style = MaterialTheme.typography.titleMedium)
+                Text(title, color = Paper, style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(3.dp))
-                Text("Отбой, подготовка ко сну и утренний триггер", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Text(detail, color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
             Text("→", color = Acid, fontSize = 23.sp)
         }
@@ -643,9 +1175,12 @@ private fun DecisionCard(
     number: String,
     description: String,
     status: DecisionStatus?,
-    reason: ViolationReason?,
+    reasonLabel: String?,
     onYes: () -> Unit,
     onNo: () -> Unit,
+    collapsed: Boolean = false,
+    current: Boolean = false,
+    onToggleCollapsed: () -> Unit = {},
     footer: (@Composable () -> Unit)? = null,
 ) {
     val background by animateColorAsState(
@@ -656,10 +1191,40 @@ private fun DecisionCard(
         },
         label = "decisionColor",
     )
-    PremiumCard(background, if (status == DecisionStatus.YES) Acid.copy(alpha = 0.38f) else Hairline) {
+    AnimatedContent(targetState = collapsed, label = "collapse$number") { isCollapsed ->
+        if (isCollapsed) {
+            PremiumCard(
+                color = Acid.copy(alpha = .08f),
+                border = Acid.copy(alpha = .34f),
+                modifier = Modifier.clickable(onClick = onToggleCollapsed),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(number, color = Acid, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.width(14.dp))
+                    Text(title, color = Paper, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text("✓", color = Acid, fontWeight = FontWeight.Black, fontSize = 19.sp)
+                }
+            }
+            return@AnimatedContent
+        }
+        PremiumCard(
+            color = if (current && status == null) Acid.copy(alpha = .06f) else background,
+            border = when {
+                current && status == null -> Acid.copy(alpha = .78f)
+                status == DecisionStatus.YES -> Acid.copy(alpha = .38f)
+                else -> Hairline
+            },
+            modifier = Modifier.animateContentSize(),
+        ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
-                Text(number, color = if (status == null) Muted else Acid, style = MaterialTheme.typography.labelMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(number, color = if (status == null) Muted else Acid, style = MaterialTheme.typography.labelMedium)
+                    if (current && status == null) {
+                        Spacer(Modifier.width(9.dp))
+                        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.2.sp)
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 Text(title, color = Paper, style = MaterialTheme.typography.headlineMedium, letterSpacing = 1.sp)
                 Spacer(Modifier.height(7.dp))
@@ -667,7 +1232,10 @@ private fun DecisionCard(
             }
             if (status != null) {
                 Box(
-                    Modifier.size(34.dp).background(if (status == DecisionStatus.YES) Acid else Danger, CircleShape),
+                    Modifier
+                        .size(34.dp)
+                        .background(if (status == DecisionStatus.YES) Acid else Danger, CircleShape)
+                        .clickable(enabled = status == DecisionStatus.YES, onClick = onToggleCollapsed),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(if (status == DecisionStatus.YES) "✓" else "×", color = Ink, fontWeight = FontWeight.Black, fontSize = 19.sp)
@@ -679,12 +1247,12 @@ private fun DecisionCard(
             DecisionButton("ДА", status == DecisionStatus.YES, true, Modifier.weight(1f), onYes)
             DecisionButton("НЕТ", status == DecisionStatus.NO, false, Modifier.weight(1f), onNo)
         }
-        AnimatedVisibility(reason != null, enter = fadeIn(), exit = fadeOut()) {
-            if (reason != null) {
+        AnimatedVisibility(reasonLabel != null, enter = fadeIn(), exit = fadeOut()) {
+            if (reasonLabel != null) {
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("ПРИЧИНА", color = Muted, style = MaterialTheme.typography.labelMedium)
                     Spacer(Modifier.width(8.dp))
-                    Text(reason.label, color = Danger, style = MaterialTheme.typography.labelLarge)
+                    Text(reasonLabel, color = Danger, style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
@@ -694,6 +1262,133 @@ private fun DecisionCard(
             Spacer(Modifier.height(16.dp))
             footer()
         }
+        }
+    }
+}
+
+@Composable
+private fun WaterCard(
+    quarters: Int,
+    onMinus: () -> Unit,
+    onPlus: () -> Unit,
+    collapsed: Boolean = false,
+    current: Boolean = false,
+    onToggleCollapsed: () -> Unit = {},
+) {
+    val completed = quarters >= SystemLogic.WATER_GOAL_QUARTERS
+    val progress by animateFloatAsState(
+        (quarters / SystemLogic.WATER_GOAL_QUARTERS.toFloat()).coerceIn(0f, 1f),
+        spring(stiffness = Spring.StiffnessLow),
+        label = "waterProgress",
+    )
+    val background by animateColorAsState(
+        if (completed) Acid.copy(alpha = .10f) else SurfaceRaised,
+        label = "waterColor",
+    )
+    AnimatedContent(targetState = collapsed, label = "collapseWater") { isCollapsed ->
+        if (isCollapsed) {
+            PremiumCard(
+                color = Acid.copy(alpha = .08f),
+                border = Acid.copy(alpha = .34f),
+                modifier = Modifier.clickable(onClick = onToggleCollapsed),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("04", color = Acid, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.width(14.dp))
+                    Text("Watering · ${SystemLogic.formatWaterLiters(quarters)} л", color = Paper, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text("✓", color = Acid, fontWeight = FontWeight.Black, fontSize = 19.sp)
+                }
+            }
+            return@AnimatedContent
+        }
+        PremiumCard(
+            color = if (current && !completed) Acid.copy(alpha = .06f) else background,
+            border = when {
+                current && !completed -> Acid.copy(alpha = .78f)
+                completed -> Acid.copy(alpha = .38f)
+                else -> Hairline
+            },
+            modifier = Modifier.animateContentSize(),
+        ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("04", color = if (quarters == 0) Muted else Acid, style = MaterialTheme.typography.labelMedium)
+                    if (current && !completed) {
+                        Spacer(Modifier.width(9.dp))
+                        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.2.sp)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("Watering", color = Paper, style = MaterialTheme.typography.headlineMedium, letterSpacing = 1.sp)
+                Spacer(Modifier.height(7.dp))
+                Text("Выпить за день 2,5 литра воды.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (completed) {
+                Box(
+                    Modifier.size(34.dp).background(Acid, CircleShape).clickable(onClick = onToggleCollapsed),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("✓", color = Ink, fontWeight = FontWeight.Black, fontSize = 19.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            WaterAdjustButton("−", "Убавить 0,25 литра", quarters > 0, onClick = onMinus)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "${SystemLogic.formatWaterLiters(quarters)} л",
+                    color = if (completed) Acid else Paper,
+                    style = MaterialTheme.typography.headlineLarge,
+                )
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.fillMaxWidth().height(7.dp).background(Hairline, CircleShape)) {
+                    Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(Acid, CircleShape))
+                }
+                Spacer(Modifier.height(7.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("0", color = Muted, style = MaterialTheme.typography.labelMedium)
+                    Text("2,5 л", color = if (completed) Acid else Muted, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            WaterAdjustButton(
+                "+",
+                "Добавить 0,25 литра",
+                quarters < SystemLogic.WATER_MAX_QUARTERS,
+                strong = quarters == SystemLogic.WATER_GOAL_QUARTERS - 1,
+                onClick = onPlus,
+            )
+        }
+        }
+    }
+}
+
+@Composable
+private fun WaterAdjustButton(
+    text: String,
+    description: String,
+    enabled: Boolean,
+    strong: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    Box(
+        Modifier
+            .size(52.dp)
+            .clip(CircleShape)
+            .background(if (enabled) SurfaceSoft else SurfaceSoft.copy(alpha = .35f))
+            .border(1.dp, if (enabled) Acid.copy(alpha = .45f) else Hairline, CircleShape)
+            .semantics { role = Role.Button; contentDescription = description }
+            .clickable(enabled = enabled) {
+                haptics.performHapticFeedback(if (strong) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove)
+                onClick()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = if (enabled) Paper else Muted.copy(alpha = .35f), fontSize = 28.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -729,22 +1424,39 @@ private fun DecisionButton(
 }
 
 @Composable
-private fun AdmissionProgress(target: Int, day: Int, total: Int, completed: Boolean) {
+private fun AdmissionProgress(target: Int, level: Int, total: Int, completed: Boolean) {
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
             Column {
-                Text(if (completed) "СТАНДАРТ" else "ТЕКУЩИЙ ДОПУСК", color = Muted, style = MaterialTheme.typography.labelMedium)
+                Text("УРОВЕНЬ", color = Muted, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(4.dp))
-                Text("$target", color = Acid, style = MaterialTheme.typography.displayMedium)
+                Text("$level", color = Acid, style = MaterialTheme.typography.displayMedium)
             }
-            Text(if (completed) "20 ПОДРЯД" else "ДЕНЬ $day ИЗ $total", color = Paper, style = MaterialTheme.typography.labelLarge)
+            Text("$target ПОДРЯД", color = Paper, style = MaterialTheme.typography.labelLarge)
         }
         Spacer(Modifier.height(10.dp))
         Box(Modifier.fillMaxWidth().height(5.dp).background(Hairline, CircleShape)) {
-            val fraction = if (completed) 1f else day / total.toFloat()
+            val fraction = if (completed) 1f else level / total.toFloat()
             val animated by animateFloatAsState(fraction, spring(stiffness = Spring.StiffnessLow), label = "admission")
             Box(Modifier.fillMaxWidth(animated).fillMaxHeight().background(Acid, CircleShape))
         }
+    }
+}
+
+@Composable
+private fun LightPlanProgress(plan: LightPlanState) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("ПЛАН ПРИВЫКАНИЯ", color = Muted, style = MaterialTheme.typography.labelMedium)
+            Text("${plan.day}/${plan.totalDays}", color = Paper, style = MaterialTheme.typography.labelLarge)
+        }
+        Spacer(Modifier.height(10.dp))
+        Box(Modifier.fillMaxWidth().height(5.dp).background(Hairline, CircleShape)) {
+            val fraction = if (plan.completed) 1f else plan.day / plan.totalDays.toFloat()
+            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(Acid, CircleShape))
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("Держи дискомфорт на уровне 3–5/10. Если он выше — повтори предыдущий этап.", color = Muted, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -759,6 +1471,7 @@ private fun TonightProtocol(settings: SystemSettings) {
     PremiumCard(color = SurfaceRaised, border = Hairline) {
         Text("ПРОТОКОЛ ВЕЧЕРА", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.4.sp)
         Spacer(Modifier.height(16.dp))
+        TimelineItem(SystemLogic.formatTime(settings.dietTime), "Отметить питание", false)
         TimelineItem(SystemLogic.formatTime(settings.digitalCutoff.minusMinutes(15)), "Заверши текущее", false)
         TimelineItem(SystemLogic.formatTime(settings.digitalCutoff), "Цифровой отбой", false)
         TimelineItem(SystemLogic.formatTime(settings.bedTime.minusMinutes(30)), "Подготовка ко сну", false)
@@ -780,8 +1493,13 @@ private fun TimelineItem(time: String, text: String, last: Boolean) {
 }
 
 @Composable
-private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (ViolationReason) -> Unit) {
+private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (String) -> Unit) {
     val haptics = LocalHapticFeedback.current
+    val reasons = when (kind) {
+        DecisionKind.SLEEP -> ViolationReason.entries.map { it.id to it.label }
+        DecisionKind.DIET -> DietViolationReason.entries.map { it.id to it.label }
+        DecisionKind.MORNING, DecisionKind.LIGHT, DecisionKind.WATER -> emptyList()
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = SurfaceRaised,
@@ -791,11 +1509,15 @@ private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (Vi
         Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 36.dp)) {
             Text("ЗАФИКСИРОВАТЬ ПРИЧИНУ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.8.sp)
             Spacer(Modifier.height(10.dp))
-            Text(if (kind == DecisionKind.SLEEP) "Что сорвало вечер?" else "Что остановило утром?", color = Paper, style = MaterialTheme.typography.headlineLarge)
+            Text(
+                if (kind == DecisionKind.DIET) "Что помешало питанию?" else "Что сорвало вечер?",
+                color = Paper,
+                style = MaterialTheme.typography.headlineLarge,
+            )
             Spacer(Modifier.height(8.dp))
             Text("Без оправданий и самооценки — только факт для анализа.", color = Muted, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(22.dp))
-            ViolationReason.entries.forEach { reason ->
+            reasons.forEach { (id, label) ->
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -805,14 +1527,14 @@ private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (Vi
                         .border(1.dp, Hairline, RoundedCornerShape(16.dp))
                         .clickable {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onReason(reason)
+                            onReason(id)
                         }
                         .padding(horizontal = 16.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(Modifier.size(8.dp).background(Danger, CircleShape))
                     Spacer(Modifier.width(13.dp))
-                    Text(reason.label, color = Paper, style = MaterialTheme.typography.titleMedium)
+                    Text(label, color = Paper, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.weight(1f))
                     Text("→", color = Muted, fontSize = 20.sp)
                 }
@@ -840,7 +1562,11 @@ private fun PremiumCard(
 }
 
 @Composable
-private fun HistoryScreen(repository: SystemRepository, onNo: (LocalDate, DecisionKind) -> Unit) {
+private fun HistoryScreen(
+    repository: SystemRepository,
+    onNo: (LocalDate, DecisionKind) -> Unit,
+    onCelebrate: (DecisionKind) -> Unit,
+) {
     var month by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     val today = LocalDate.now()
@@ -850,7 +1576,7 @@ private fun HistoryScreen(repository: SystemRepository, onNo: (LocalDate, Decisi
         contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 28.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        item { ScreenHeader("История", "Календарь", "Не серия. Карта фактов и повторяющихся решений.") }
+        item { ScreenHeader("История", "Календарь", "История и карта повторяющихся решений.") }
         item {
             CalendarCard(
                 month = month,
@@ -872,12 +1598,80 @@ private fun HistoryScreen(repository: SystemRepository, onNo: (LocalDate, Decisi
         HistoryEditorSheet(
             date = date,
             record = repository.recordFor(date),
-            admissionTarget = SystemLogic.admissionFor(date, repository.settings.admissionStart).target,
+            admissionTarget = SystemLogic.admissionFor(
+                date,
+                repository.settings.admissionStart,
+                repository.records.values,
+            ).target,
+            lightPlan = SystemLogic.lightPlanFor(date, repository.settings.lightStart),
             onDismiss = { selectedDate = null },
-            onSleepYes = { repository.setSleep(date, DecisionStatus.YES) },
-            onSleepNo = { selectedDate = null; onNo(date, DecisionKind.SLEEP) },
-            onMorningYes = { repository.setMorning(date, DecisionStatus.YES) },
-            onMorningNo = { selectedDate = null; onNo(date, DecisionKind.MORNING) },
+            onSleepYes = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).sleep, DecisionStatus.YES) == null) repository.clearSleep(date)
+                else {
+                    repository.setSleep(date, DecisionStatus.YES)
+                    selectedDate = null
+                    onCelebrate(DecisionKind.SLEEP)
+                }
+            },
+            onSleepNo = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).sleep, DecisionStatus.NO) == null) repository.clearSleep(date)
+                else {
+                    selectedDate = null
+                    onNo(date, DecisionKind.SLEEP)
+                }
+            },
+            onMorningYes = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).morning, DecisionStatus.YES) == null) repository.clearMorning(date)
+                else {
+                    repository.setMorning(date, DecisionStatus.YES)
+                    selectedDate = null
+                    onCelebrate(DecisionKind.MORNING)
+                }
+            },
+            onMorningNo = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).morning, DecisionStatus.NO) == null) repository.clearMorning(date)
+                else {
+                    selectedDate = null
+                    onNo(date, DecisionKind.MORNING)
+                }
+            },
+            onLightYes = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).light, DecisionStatus.YES) == null) repository.clearLight(date)
+                else {
+                    repository.setLight(date, DecisionStatus.YES)
+                    selectedDate = null
+                    onCelebrate(DecisionKind.LIGHT)
+                }
+            },
+            onLightNo = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).light, DecisionStatus.NO) == null) repository.clearLight(date)
+                else {
+                    selectedDate = null
+                    onNo(date, DecisionKind.LIGHT)
+                }
+            },
+            onDietYes = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).diet, DecisionStatus.YES) == null) repository.clearDiet(date)
+                else {
+                    repository.setDiet(date, DecisionStatus.YES)
+                    selectedDate = null
+                    onCelebrate(DecisionKind.DIET)
+                }
+            },
+            onDietNo = {
+                if (SystemLogic.toggledDecision(repository.recordFor(date).diet, DecisionStatus.NO) == null) repository.clearDiet(date)
+                else {
+                    selectedDate = null
+                    onNo(date, DecisionKind.DIET)
+                }
+            },
+            onWaterMinus = { repository.adjustWater(date, -1) },
+            onWaterPlus = {
+                if (repository.adjustWater(date, 1)) {
+                    selectedDate = null
+                    onCelebrate(DecisionKind.WATER)
+                }
+            },
         )
     }
 }
@@ -935,8 +1729,8 @@ private fun CalendarDay(
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
-    val good = listOf(record?.sleep, record?.morning).count { it == DecisionStatus.YES }
-    val bad = listOf(record?.sleep, record?.morning).count { it == DecisionStatus.NO }
+    val good = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.YES }
+    val bad = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.NO }
     Box(
         modifier
             .aspectRatio(1f)
@@ -950,7 +1744,7 @@ private fun CalendarDay(
             Text(date.dayOfMonth.toString(), color = if (enabled) Paper else Muted.copy(alpha = .35f), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (record == null || (record.sleep == null && record.morning == null)) {
+                if (record == null || (record.sleep == null && record.morning == null && record.light == null && record.diet == null && record.water == null)) {
                     Box(Modifier.size(3.dp).background(Hairline, CircleShape))
                 } else {
                     repeat(good) { Box(Modifier.size(4.dp).background(Acid, CircleShape)) }
@@ -1000,15 +1794,22 @@ private fun LegendDot(color: Color, label: String) {
 private fun MonthSummary(records: List<DailyRecord>) {
     val sleep = SystemLogic.compliance(records) { it.sleep }
     val morning = SystemLogic.compliance(records) { it.morning }
+    val light = SystemLogic.compliance(records) { it.light }
+    val diet = SystemLogic.compliance(records) { it.diet }
+    val water = SystemLogic.compliance(records) { it.water }
     PremiumCard(color = SurfaceSoft) {
         Text("ИТОГ МЕСЯЦА", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth()) {
-            CompactMetric("СОН", sleep, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
             CompactMetric("УТРО", morning, Modifier.weight(1f))
             Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
-            CompactMetric("ДНЕЙ", records.size, Modifier.weight(1f), suffix = "")
+            CompactMetric("СВЕТ", light, Modifier.weight(1f))
+            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
+            CompactMetric("ПИТАНИЕ", diet, Modifier.weight(1f))
+            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
+            CompactMetric("ВОДА", water, Modifier.weight(1f))
+            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
+            CompactMetric("СОН", sleep, Modifier.weight(1f))
         }
     }
 }
@@ -1016,8 +1817,19 @@ private fun MonthSummary(records: List<DailyRecord>) {
 @Composable
 private fun CompactMetric(label: String, value: Int?, modifier: Modifier, suffix: String = "%") {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value?.let { "$it$suffix" } ?: "—", color = Paper, style = MaterialTheme.typography.headlineMedium)
-        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium)
+        Text(
+            value?.let { "$it$suffix" } ?: "—",
+            color = Paper,
+            fontWeight = FontWeight.Bold,
+            fontSize = 19.sp,
+            lineHeight = 23.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 10.sp, maxLines = 1)
     }
 }
 
@@ -1026,21 +1838,34 @@ private fun HistoryEditorSheet(
     date: LocalDate,
     record: DailyRecord,
     admissionTarget: Int,
+    lightPlan: LightPlanState,
     onDismiss: () -> Unit,
     onSleepYes: () -> Unit,
     onSleepNo: () -> Unit,
     onMorningYes: () -> Unit,
     onMorningNo: () -> Unit,
+    onLightYes: () -> Unit,
+    onLightNo: () -> Unit,
+    onDietYes: () -> Unit,
+    onDietNo: () -> Unit,
+    onWaterMinus: () -> Unit,
+    onWaterPlus: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = SurfaceRaised, contentColor = Paper) {
-        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 34.dp)) {
             Text(date.format(DayFormatter).uppercase(Ru), color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
             Spacer(Modifier.height(7.dp))
             Text("Редактировать день", color = Paper, style = MaterialTheme.typography.headlineLarge)
             Spacer(Modifier.height(22.dp))
-            HistoryDecisionRow("СОН", "Отбой и кровать вовремя", record.sleep, onSleepYes, onSleepNo)
-            Spacer(Modifier.height(12.dp))
             HistoryDecisionRow("УТРО", "$admissionTarget ${pushupWord(admissionTarget)} подряд", record.morning, onMorningYes, onMorningNo)
+            Spacer(Modifier.height(12.dp))
+            HistoryDecisionRow("СВЕТ", "День ${lightPlan.day}: ${lightPlan.task}", record.light, onLightYes, onLightNo)
+            Spacer(Modifier.height(12.dp))
+            HistoryDecisionRow("ПИТАНИЕ", "Без сладкого и без чипсов", record.diet, onDietYes, onDietNo)
+            Spacer(Modifier.height(12.dp))
+            WaterCard(SystemLogic.waterQuarters(record) ?: 0, onWaterMinus, onWaterPlus)
+            Spacer(Modifier.height(12.dp))
+            HistoryDecisionRow("СОН", "Отбой и кровать вовремя", record.sleep, onSleepYes, onSleepNo)
         }
     }
 }
@@ -1075,17 +1900,31 @@ private fun HistoryDecisionRow(
 
 @Composable
 private fun StatsScreen(repository: SystemRepository) {
+    var showWeeklyReport by remember { mutableStateOf(false) }
     val today = LocalDate.now()
+    if (showWeeklyReport) {
+        WeeklyReportScreen(
+            report = SystemLogic.weeklyReport(today, repository.records.values, repository.experimentFeedback),
+            onBack = { showWeeklyReport = false },
+        )
+        return
+    }
     val recentRecords = repository.records.values.filter {
         !it.date.isBefore(today.minusDays(29)) && !it.date.isAfter(today)
     }
     val sleep = SystemLogic.compliance(recentRecords) { it.sleep }
     val morning = SystemLogic.compliance(recentRecords) { it.morning }
-    val reasons = ViolationReason.entries.associateWith { reason ->
+    val light = SystemLogic.compliance(recentRecords) { it.light }
+    val diet = SystemLogic.compliance(recentRecords) { it.diet }
+    val water = SystemLogic.compliance(recentRecords) { it.water }
+    val correlations = SystemLogic.correlationAnalysis(repository.records.values)
+    val sleepReasons = ViolationReason.entries.associate { reason -> reason.label to
         recentRecords.sumOf { record ->
-            (if (record.sleep == DecisionStatus.NO && record.sleepReason == reason) 1 else 0) +
-                (if (record.morning == DecisionStatus.NO && record.morningReason == reason) 1 else 0)
+            if (record.sleep == DecisionStatus.NO && record.sleepReason == reason) 1 else 0
         }
+    }
+    val dietReasons = DietViolationReason.entries.associate { reason -> reason.label to
+        recentRecords.count { it.diet == DecisionStatus.NO && it.dietReason == reason }
     }
 
     LazyColumn(
@@ -1093,15 +1932,42 @@ private fun StatsScreen(repository: SystemRepository) {
         contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 28.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        item { ScreenHeader("Анализ", "30 дней", "Не оценка характера. Только данные, которые помогают изменить среду.") }
+        item { ScreenHeader("Анализ", "30 дней", "Факты, данные и статистика.") }
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                MetricRing("СОН", sleep, Modifier.weight(1f))
-                MetricRing("УТРО", morning, Modifier.weight(1f))
+            PremiumCard(
+                modifier = Modifier.clickable { showWeeklyReport = true },
+                color = Acid.copy(alpha = .09f),
+                border = Acid.copy(alpha = .28f),
+            ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("НЕДЕЛЬНЫЙ ОТЧЁТ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+                        Spacer(Modifier.height(7.dp))
+                        Text("Управленческий бриф", color = Paper, style = MaterialTheme.typography.titleLarge)
+                        Spacer(Modifier.height(4.dp))
+                        Text("Результат, закономерности и одно решение на следующую неделю.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("→", color = Acid, style = MaterialTheme.typography.headlineMedium)
+                }
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MetricRing("УТРО", morning, Modifier.weight(1f))
+                    MetricRing("СВЕТ", light, Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MetricRing("ПИТАНИЕ", diet, Modifier.weight(1f))
+                    MetricRing("ВОДА", water, Modifier.weight(1f))
+                    MetricRing("СОН", sleep, Modifier.weight(1f))
+                }
             }
         }
         item { LastSevenDays(repository.records, today) }
-        item { ReasonAnalysis(reasons) }
+        item { CorrelationAnalysisCard(correlations) }
+        item { ReasonAnalysis("ПРИЧИНЫ НАРУШЕНИЯ СНА", sleepReasons) }
+        item { ReasonAnalysis("ПРИЧИНЫ НАРУШЕНИЯ ПИТАНИЯ", dietReasons) }
         item {
             PremiumCard(color = Acid.copy(alpha = .09f), border = Acid.copy(alpha = .25f)) {
                 Text("ПРИНЦИП", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
@@ -1115,19 +1981,184 @@ private fun StatsScreen(repository: SystemRepository) {
 }
 
 @Composable
+private fun WeeklyReportScreen(report: WeeklyReport, onBack: () -> Unit) {
+    val period = "${report.weekStart.format(DateTimeFormatter.ofPattern("d MMM", Ru))} — ${report.weekEnd.format(DateTimeFormatter.ofPattern("d MMM", Ru))}"
+    LazyColumn(
+        Modifier.fillMaxSize().statusBarsPadding(),
+        contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                CircleTextButton("‹", "Назад", onBack)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("НЕДЕЛЬНЫЙ ОТЧЁТ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
+                    Text(period.uppercase(Ru), color = Muted, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        item {
+            PremiumCard(color = SurfaceSoft, border = Acid.copy(alpha = .22f)) {
+                Text("ВЫПОЛНЕНИЕ", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(report.overall?.let { "$it%" } ?: "—", color = Paper, style = MaterialTheme.typography.displayLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    when (report.overall) {
+                        null -> "Неделя ещё не содержит решений."
+                        in 85..100 -> "Стандарт работает устойчиво."
+                        in 65..84 -> "Основа есть. Нужна точечная корректировка."
+                        else -> "Сейчас важнее восстановить управляемость, а не идеальность."
+                    },
+                    color = Muted,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(20.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    report.metrics.forEachIndexed { index, metric ->
+                        CompactMetric(metric.label, metric.value, Modifier.weight(1f))
+                        if (index < report.metrics.lastIndex) Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
+                    }
+                }
+            }
+        }
+        item {
+            PremiumCard {
+                Text("КАРТИНА НЕДЕЛИ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
+                Spacer(Modifier.height(18.dp))
+                ReportFact("Сильная сторона", report.strongest ?: "Недостаточно данных", Acid)
+                Spacer(Modifier.height(14.dp))
+                ReportFact("Зона внимания", report.weakest ?: "Недостаточно данных", Amber)
+                Spacer(Modifier.height(14.dp))
+                ReportFact("Частая причина", report.topReason ?: "Причины не зафиксированы", Danger)
+            }
+        }
+        item {
+            PremiumCard {
+                Text("НАБЛЮДЕНИЕ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    report.insight ?: "Для надёжной взаимосвязи нужно не меньше ${SystemLogic.MIN_CORRELATION_DAYS} сопоставимых дней.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
+        }
+        item {
+            PremiumCard(color = Acid.copy(alpha = .09f), border = Acid.copy(alpha = .28f)) {
+                Text("РЕШЕНИЕ СЛЕДУЮЩЕЙ НЕДЕЛИ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
+                Spacer(Modifier.height(10.dp))
+                Text(report.experiment.focus.title, color = Paper, style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(7.dp))
+                Text(report.experiment.focus.action, color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(14.dp))
+                Text(report.experiment.basis, color = Muted, style = MaterialTheme.typography.labelMedium)
+                report.experimentFeedback?.let { feedback ->
+                    Spacer(Modifier.height(10.dp))
+                    Text("ИТОГ: ${feedback.label.uppercase(Ru)}", color = Acid, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReportFact(label: String, value: String, color: Color) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).background(color, CircleShape))
+        Spacer(Modifier.width(11.dp))
+        Column {
+            Text(label.uppercase(Ru), color = Muted, style = MaterialTheme.typography.labelMedium)
+            Text(value, color = Paper, style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
+private fun CorrelationAnalysisCard(analysis: com.personal.thesystem.model.CorrelationAnalysis) {
+    PremiumCard {
+        Text("ВЗАИМОСВЯЗИ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
+        Spacer(Modifier.height(5.dp))
+        Text("Система сравнивает дни, но не выдаёт совпадение за причину.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(18.dp))
+
+        if (analysis.insights.isEmpty()) {
+            val remaining = (analysis.requiredDays - analysis.comparableDays).coerceAtLeast(0)
+            Text(
+                if (remaining > 0) "Нужно ещё $remaining сопоставимых дней." else "Нужны примеры как «ДА», так и «НЕТ», чтобы сравнение было честным.",
+                color = Paper,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            Box(Modifier.fillMaxWidth().height(7.dp).background(Hairline, CircleShape)) {
+                Box(
+                    Modifier
+                        .fillMaxWidth((analysis.comparableDays / analysis.requiredDays.toFloat()).coerceIn(0f, 1f))
+                        .fillMaxHeight()
+                        .background(Acid, CircleShape)
+                )
+            }
+            Spacer(Modifier.height(7.dp))
+            Text("${analysis.comparableDays.coerceAtMost(analysis.requiredDays)}/${analysis.requiredDays} дней", color = Muted, style = MaterialTheme.typography.labelMedium)
+        } else {
+            analysis.insights.forEachIndexed { index, insight ->
+                if (index > 0) {
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider(color = Hairline)
+                    Spacer(Modifier.height(16.dp))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(insight.title, color = Acid, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.sp)
+                    Text("${insight.sampleSize} ДНЕЙ", color = Muted, style = MaterialTheme.typography.labelMedium)
+                }
+                Spacer(Modifier.height(9.dp))
+                Text("${insight.yesLabel}: ${insight.yesRate}%", color = Paper, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                Text("${insight.noLabel}: ${insight.noRate}%", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(7.dp))
+                Text("Разница: ${abs(insight.yesRate - insight.noRate)} п. п.", color = Muted, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+@Composable
 private fun MetricRing(label: String, value: Int?, modifier: Modifier) {
     val target = (value ?: 0) / 100f
     val animated by animateFloatAsState(target, spring(stiffness = Spring.StiffnessLow), label = "metric")
     PremiumCard(modifier = modifier) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1.2f), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.fillMaxSize().padding(12.dp)) {
-                val stroke = 8.dp.toPx()
-                drawArc(Hairline, -215f, 250f, false, style = Stroke(stroke, cap = StrokeCap.Round))
-                drawArc(Acid, -215f, 250f * animated, false, style = Stroke(stroke, cap = StrokeCap.Round))
-            }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(value?.let { "$it%" } ?: "—", color = Paper, style = MaterialTheme.typography.headlineLarge)
-                Text(label, color = Muted, style = MaterialTheme.typography.labelMedium)
+        BoxWithConstraints(Modifier.fillMaxWidth().aspectRatio(1.2f), contentAlignment = Alignment.Center) {
+            val compact = maxWidth < 110.dp
+            if (compact) {
+                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Box(Modifier.size(60.dp), contentAlignment = Alignment.Center) {
+                        Canvas(Modifier.fillMaxSize().padding(2.dp)) {
+                            val stroke = 4.dp.toPx()
+                            drawArc(Hairline, -215f, 250f, false, style = Stroke(stroke, cap = StrokeCap.Round))
+                            drawArc(Acid, -215f, 250f * animated, false, style = Stroke(stroke, cap = StrokeCap.Round))
+                        }
+                        Text(
+                            value?.let { "$it%" } ?: "—",
+                            color = Paper,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            lineHeight = 18.sp,
+                            maxLines = 1,
+                        )
+                    }
+                    Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp, maxLines = 1)
+                }
+            } else {
+                Canvas(Modifier.fillMaxSize().padding(12.dp)) {
+                    val stroke = 8.dp.toPx()
+                    drawArc(Hairline, -215f, 250f, false, style = Stroke(stroke, cap = StrokeCap.Round))
+                    drawArc(Acid, -215f, 250f * animated, false, style = Stroke(stroke, cap = StrokeCap.Round))
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(value?.let { "$it%" } ?: "—", color = Paper, style = MaterialTheme.typography.headlineMedium, maxLines = 1)
+                    Text(label, color = Muted, style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
     }
@@ -1138,21 +2169,21 @@ private fun LastSevenDays(records: Map<LocalDate, DailyRecord>, today: LocalDate
     PremiumCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("ПОСЛЕДНИЕ 7 ДНЕЙ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
-            Text("СОН + УТРО", color = Muted, style = MaterialTheme.typography.labelMedium)
+            Text("5 ЗАДАЧ", color = Muted, style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.height(22.dp))
         Row(Modifier.fillMaxWidth().height(116.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
             (6 downTo 0).map { today.minusDays(it.toLong()) }.forEach { date ->
                 val record = records[date]
-                val answered = listOf(record?.sleep, record?.morning).count { it != null }
-                val yes = listOf(record?.sleep, record?.morning).count { it == DecisionStatus.YES }
-                val fraction = if (answered == 0) 0.04f else yes / 2f
+                val answered = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it != null }
+                val yes = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.YES }
+                val fraction = if (answered == 0) 0.04f else yes / 5f
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom, modifier = Modifier.width(30.dp)) {
                     Box(
                         Modifier
                             .width(9.dp)
                             .height((74 * max(.06f, fraction)).dp)
-                            .background(if (answered == 0) Hairline else if (yes == 2) Acid else if (yes == 1) Amber else Danger, CircleShape)
+                            .background(if (answered == 0) Hairline else if (yes == 5) Acid else if (yes > 0) Amber else Danger, CircleShape)
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(date.dayOfWeek.getDisplayName(TextStyle.SHORT, Ru).take(2).uppercase(Ru), color = if (date == today) Paper else Muted, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp)
@@ -1163,18 +2194,17 @@ private fun LastSevenDays(records: Map<LocalDate, DailyRecord>, today: LocalDate
 }
 
 @Composable
-private fun ReasonAnalysis(reasons: Map<ViolationReason, Int>) {
+private fun ReasonAnalysis(title: String, reasons: Map<String, Int>) {
     val maxCount = max(1, reasons.values.maxOrNull() ?: 0)
     val total = reasons.values.sum()
     PremiumCard {
-        Text("ПРИЧИНЫ НАРУШЕНИЙ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
+        Text(title, color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
         Spacer(Modifier.height(5.dp))
         Text(if (total == 0) "Пока нарушений с указанной причиной нет." else "$total зафиксированных причин за 30 дней", color = Muted, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(20.dp))
-        ViolationReason.entries.forEach { reason ->
-            val count = reasons[reason] ?: 0
+        reasons.forEach { (label, count) ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(reason.label, color = if (count > 0) Paper else Muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(76.dp))
+                Text(label, color = if (count > 0) Paper else Muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(118.dp))
                 Box(Modifier.weight(1f).height(7.dp).background(Hairline, CircleShape)) {
                     val fraction = count / maxCount.toFloat()
                     Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(if (count > 0) Danger else Hairline, CircleShape))
@@ -1189,15 +2219,17 @@ private fun ReasonAnalysis(reasons: Map<ViolationReason, Int>) {
 @Composable
 private fun SettingsScreen(
     settings: SystemSettings,
+    records: Collection<DailyRecord>,
     onUpdate: ((SystemSettings) -> SystemSettings) -> Unit,
     onEnableNotifications: () -> Unit,
+    exactAlarmsAllowed: Boolean,
 ) {
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
         contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 28.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        item { ScreenHeader("Настройки", "Режим", "Время меняется здесь один раз — вечером решения уже не пересматриваются.") }
+        item { ScreenHeader("Настройки", "Режим", "График уведомлений и напоминаний.") }
         item {
             SettingsGroup("РАСПИСАНИЕ") {
                 TimeSettingRow("Цифровой отбой", "Телефон и ноутбук выключены", settings.digitalCutoff) { delta ->
@@ -1211,14 +2243,41 @@ private fun SettingsScreen(
                 TimeSettingRow("Утренний триггер", "Сразу после пробуждения", settings.morningTime) { delta ->
                     onUpdate { it.copy(morningTime = it.morningTime.plusMinutes(delta.toLong())) }
                 }
+                SettingsDivider()
+                TimeSettingRow("Питание", "Напомнить отметить день", settings.dietTime) { delta ->
+                    onUpdate { it.copy(dietTime = it.dietTime.plusMinutes(delta.toLong())) }
+                }
+            }
+        }
+        item {
+            SettingsGroup("РЕЖИМ ВШЭ") {
+                ToggleSettingRow(
+                    "Учебный режим",
+                    "По будням: первая пара, выход и главная задача",
+                    settings.hseModeEnabled,
+                ) { enabled -> onUpdate { it.copy(hseModeEnabled = enabled) } }
+                if (settings.hseModeEnabled) {
+                    SettingsDivider()
+                    TimeSettingRow("Первая пара", "Единое время для будних дней", settings.hseFirstClassTime) { delta ->
+                        onUpdate { it.copy(hseFirstClassTime = it.hseFirstClassTime.plusMinutes(delta.toLong())) }
+                    }
+                    SettingsDivider()
+                    NumberSettingRow("Дорога", "Запас от дома до ВШЭ", settings.hseCommuteMinutes, "мин") { delta ->
+                        onUpdate { it.copy(hseCommuteMinutes = (it.hseCommuteMinutes + delta).coerceIn(10, 180)) }
+                    }
+                }
             }
         }
         item {
             SettingsGroup("НАПОМИНАНИЯ") {
                 ToggleSettingRow(
                     "Локальные напоминания",
-                    if (settings.notificationsEnabled) "Активны на этом устройстве" else "Нужно разрешение Android",
-                    settings.notificationsEnabled,
+                    when {
+                        !settings.notificationsEnabled -> "Нужно разрешение Android"
+                        !exactAlarmsAllowed -> "Разреши Android присылать их точно вовремя"
+                        else -> "Приходят точно по расписанию"
+                    },
+                    settings.notificationsEnabled && exactAlarmsAllowed,
                 ) { enabled ->
                     if (enabled) onEnableNotifications() else onUpdate { it.copy(notificationsEnabled = false) }
                 }
@@ -1232,21 +2291,23 @@ private fun SettingsScreen(
                 ToggleSettingRow("В кровати", SystemLogic.formatTime(settings.bedTime), settings.bedEnabled) { value -> onUpdate { it.copy(bedEnabled = value) } }
                 SettingsDivider()
                 ToggleSettingRow("Утренние отжимания", SystemLogic.formatTime(settings.morningTime), settings.morningEnabled) { value -> onUpdate { it.copy(morningEnabled = value) } }
+                SettingsDivider()
+                ToggleSettingRow("Питание", SystemLogic.formatTime(settings.dietTime), settings.dietEnabled) { value -> onUpdate { it.copy(dietEnabled = value) } }
             }
         }
         item {
-            val admission = SystemLogic.admissionFor(LocalDate.now(), settings.admissionStart)
+            val admission = SystemLogic.admissionFor(LocalDate.now(), settings.admissionStart, records)
             SettingsGroup("РЕЖИМ ДОПУСКА") {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
                     Column {
-                        Text(if (admission.completed) "Стандарт активен" else "День ${admission.day} из ${admission.totalDays}", color = Paper, style = MaterialTheme.typography.titleLarge)
+                        Text(if (admission.completed) "Стандарт активен" else "Уровень ${admission.level} из ${admission.totalLevels}", color = Paper, style = MaterialTheme.typography.titleLarge)
                         Spacer(Modifier.height(4.dp))
                         Text("10 → 12 → 14 → 16 → 18 → 20", color = Muted, style = MaterialTheme.typography.bodyMedium)
                     }
                     Text("${admission.target}", color = Acid, style = MaterialTheme.typography.displayMedium)
                 }
                 Spacer(Modifier.height(14.dp))
-                Text("После 14-го дня приложение автоматически закрепляет правило: 20 отжиманий подряд каждое утро.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Text("Уровень повышается только после отметки «УТРО — ДА». После успешного 14-го уровня приложение закрепляет правило: 20 отжиманий подряд каждое утро.", color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
         }
         item {
@@ -1273,6 +2334,19 @@ private fun TimeSettingRow(title: String, detail: String, value: LocalTime, onAd
         MiniButton("−", "Уменьшить время") { onAdjust(-5) }
         Text(SystemLogic.formatTime(value), color = Acid, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center, modifier = Modifier.width(72.dp))
         MiniButton("+", "Увеличить время") { onAdjust(5) }
+    }
+}
+
+@Composable
+private fun NumberSettingRow(title: String, detail: String, value: Int, suffix: String, onAdjust: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Paper, style = MaterialTheme.typography.titleMedium)
+            Text(detail, color = Muted, style = MaterialTheme.typography.bodyMedium)
+        }
+        MiniButton("−", "Уменьшить") { onAdjust(-5) }
+        Text("$value $suffix", color = Acid, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center, modifier = Modifier.width(72.dp))
+        MiniButton("+", "Увеличить") { onAdjust(5) }
     }
 }
 
