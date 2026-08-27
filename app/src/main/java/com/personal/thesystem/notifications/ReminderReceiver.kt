@@ -13,12 +13,19 @@ import androidx.core.content.ContextCompat
 import com.personal.thesystem.MainActivity
 import com.personal.thesystem.R
 import com.personal.thesystem.data.SystemRepository
+import java.time.LocalDate
 
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val type = intent?.getStringExtra(EXTRA_TYPE)?.let {
             runCatching { ReminderType.valueOf(it) }.getOrNull()
         } ?: return
+
+        val repository = SystemRepository(context)
+        if (!type.shouldNotify(repository.recordFor(LocalDate.now()))) {
+            ReminderScheduler.scheduleNext(context, type, repository.settings)
+            return
+        }
 
         ReminderScheduler.createChannel(context)
         val openApp = PendingIntent.getActivity(
@@ -47,7 +54,7 @@ class ReminderReceiver : BroadcastReceiver() {
             NotificationManagerCompat.from(context).notify(type.requestCode, notification)
         }
 
-        ReminderScheduler.scheduleAll(context, SystemRepository(context).settings)
+        ReminderScheduler.scheduleNext(context, type, repository.settings)
     }
 
     companion object {

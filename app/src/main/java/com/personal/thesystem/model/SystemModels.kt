@@ -64,6 +64,7 @@ data class SystemSettings(
     val preparationEnabled: Boolean = true,
     val bedEnabled: Boolean = true,
     val morningEnabled: Boolean = true,
+    val morningMusicEnabled: Boolean = true,
     val dietEnabled: Boolean = true,
     val admissionStart: LocalDate = LocalDate.now(),
     val lightStart: LocalDate = LocalDate.now(),
@@ -271,6 +272,16 @@ object SystemLogic {
     const val MONEY_TRANSFER_RUBLES = 20_000L
     const val MONEY_RESERVE_PER_TRANSFER_RUBLES = 2_000L
     val MONEY_START_DATE: LocalDate = LocalDate.of(2026, 9, 1)
+
+    fun morningArtistFor(dayOfWeek: DayOfWeek): String = when (dayOfWeek) {
+        DayOfWeek.MONDAY -> "Big Baby Tape"
+        DayOfWeek.TUESDAY -> "Bushido Zho"
+        DayOfWeek.WEDNESDAY -> "Icegergert"
+        DayOfWeek.THURSDAY -> "Friendly Thug 52 NGG"
+        DayOfWeek.FRIDAY -> "SQWOZ BAB"
+        DayOfWeek.SATURDAY -> "Aarne"
+        DayOfWeek.SUNDAY -> "kizaru"
+    }
 
     fun moneyPeriodFor(date: LocalDate): MoneyPeriod {
         if (date.isBefore(MONEY_START_DATE)) return MoneyPeriod(MONEY_START_DATE, MONEY_START_DATE.plusDays(14))

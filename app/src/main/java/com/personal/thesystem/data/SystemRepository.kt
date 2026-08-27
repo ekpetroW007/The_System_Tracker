@@ -216,6 +216,7 @@ class SystemRepository(context: Context) {
             .putBoolean(KEY_PREPARATION, settings.preparationEnabled)
             .putBoolean(KEY_BED_ENABLED, settings.bedEnabled)
             .putBoolean(KEY_MORNING_ENABLED, settings.morningEnabled)
+            .putBoolean(KEY_MORNING_MUSIC_ENABLED, settings.morningMusicEnabled)
             .putBoolean(KEY_DIET_ENABLED, settings.dietEnabled)
             .putString(KEY_ADMISSION_START, settings.admissionStart.toString())
             .putString(KEY_LIGHT_START, settings.lightStart.toString())
@@ -418,6 +419,7 @@ class SystemRepository(context: Context) {
         preparationEnabled = preferences.getBoolean(KEY_PREPARATION, true),
         bedEnabled = preferences.getBoolean(KEY_BED_ENABLED, true),
         morningEnabled = preferences.getBoolean(KEY_MORNING_ENABLED, true),
+        morningMusicEnabled = preferences.getBoolean(KEY_MORNING_MUSIC_ENABLED, true),
         dietEnabled = preferences.getBoolean(KEY_DIET_ENABLED, true),
         admissionStart = preferences.getString(KEY_ADMISSION_START, null)?.let(LocalDate::parse) ?: LocalDate.now().also {
             preferences.edit().putString(KEY_ADMISSION_START, it.toString()).apply()
@@ -450,6 +452,7 @@ class SystemRepository(context: Context) {
         private const val KEY_PREPARATION = "preparation_enabled"
         private const val KEY_BED_ENABLED = "bed_enabled"
         private const val KEY_MORNING_ENABLED = "morning_enabled"
+        private const val KEY_MORNING_MUSIC_ENABLED = "morning_music_enabled"
         private const val KEY_DIET_ENABLED = "diet_enabled"
         private const val KEY_ADMISSION_START = "admission_start"
         private const val KEY_LIGHT_START = "light_start"

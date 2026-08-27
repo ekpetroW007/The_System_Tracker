@@ -20,8 +20,8 @@ android {
         applicationId = "com.personal.thesystem"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.2.4"
+        versionCode = 15
+        versionName = "1.2.5"
 
         buildConfigField("String", "MAPKIT_API_KEY", "\"${mapkitApiKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 

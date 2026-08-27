@@ -6,9 +6,30 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.DayOfWeek
+import com.personal.thesystem.notifications.ReminderType
 
 class SystemLogicTest {
     private val start = LocalDate.of(2026, 8, 1)
+
+    @Test
+    fun everyWeekdayHasTheRequestedMorningArtist() {
+        assertEquals("Big Baby Tape", SystemLogic.morningArtistFor(DayOfWeek.MONDAY))
+        assertEquals("Bushido Zho", SystemLogic.morningArtistFor(DayOfWeek.TUESDAY))
+        assertEquals("Icegergert", SystemLogic.morningArtistFor(DayOfWeek.WEDNESDAY))
+        assertEquals("Friendly Thug 52 NGG", SystemLogic.morningArtistFor(DayOfWeek.THURSDAY))
+        assertEquals("SQWOZ BAB", SystemLogic.morningArtistFor(DayOfWeek.FRIDAY))
+        assertEquals("Aarne", SystemLogic.morningArtistFor(DayOfWeek.SATURDAY))
+        assertEquals("kizaru", SystemLogic.morningArtistFor(DayOfWeek.SUNDAY))
+    }
+
+    @Test
+    fun dietReminderIsSkippedAfterEitherDietAnswer() {
+        assertTrue(ReminderType.DIET.shouldNotify(DailyRecord(start)))
+        assertFalse(ReminderType.DIET.shouldNotify(DailyRecord(start, diet = DecisionStatus.YES)))
+        assertFalse(ReminderType.DIET.shouldNotify(DailyRecord(start, diet = DecisionStatus.NO)))
+        assertTrue(ReminderType.MORNING.shouldNotify(DailyRecord(start, diet = DecisionStatus.YES)))
+    }
 
     @Test
     fun repeatedDecisionTapClearsTheSelection() {

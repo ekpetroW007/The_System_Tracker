@@ -436,6 +436,7 @@ fun SystemApp(repository: SystemRepository) {
                         records = repository.records.values,
                         onUpdate = ::applySettings,
                         onEnableNotifications = ::enableNotifications,
+                        onRequestExactAlarmAccess = ::requestExactAlarmAccess,
                         exactAlarmsAllowed = exactAlarmsAllowed,
                     )
                 }
@@ -3352,6 +3353,7 @@ private fun SettingsScreen(
     records: Collection<DailyRecord>,
     onUpdate: ((SystemSettings) -> SystemSettings) -> Unit,
     onEnableNotifications: () -> Unit,
+    onRequestExactAlarmAccess: () -> Unit,
     exactAlarmsAllowed: Boolean,
 ) {
     val context = LocalContext.current
@@ -3430,6 +3432,15 @@ private fun SettingsScreen(
                 ToggleSettingRow("В кровати", SystemLogic.formatTime(settings.bedTime), settings.bedEnabled) { value -> onUpdate { it.copy(bedEnabled = value) } }
                 SettingsDivider()
                 ToggleSettingRow("Утренние отжимания", SystemLogic.formatTime(settings.morningTime), settings.morningEnabled) { value -> onUpdate { it.copy(morningEnabled = value) } }
+                SettingsDivider()
+                ToggleSettingRow(
+                    "Яндекс Музыка",
+                    if (settings.morningMusicEnabled && !exactAlarmsAllowed) "Нужно разрешить Android точный запуск" else "Каждое утро в 07:30 · исполнитель зависит от дня",
+                    settings.morningMusicEnabled,
+                ) { value ->
+                    onUpdate { it.copy(morningMusicEnabled = value) }
+                    if (value && !exactAlarmsAllowed) onRequestExactAlarmAccess()
+                }
                 SettingsDivider()
                 ToggleSettingRow("Питание", SystemLogic.formatTime(settings.dietTime), settings.dietEnabled) { value -> onUpdate { it.copy(dietEnabled = value) } }
             }
