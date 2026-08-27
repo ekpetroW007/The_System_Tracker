@@ -11,11 +11,14 @@ import com.personal.thesystem.data.SystemRepository
 import com.personal.thesystem.notifications.ReminderScheduler
 import com.personal.thesystem.ui.SystemApp
 import com.personal.thesystem.ui.theme.TheSystemTheme
+import com.yandex.mapkit.MapKitFactory
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: SystemRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        MapKitFactory.setApiKey(BuildConfig.MAPKIT_API_KEY)
+        MapKitFactory.initialize(this)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -36,5 +39,15 @@ class MainActivity : ComponentActivity() {
             repository.reload()
             ReminderScheduler.scheduleAll(this, repository.settings)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        MapKitFactory.getInstance().onStart()
+    }
+
+    override fun onStop() {
+        MapKitFactory.getInstance().onStop()
+        super.onStop()
     }
 }

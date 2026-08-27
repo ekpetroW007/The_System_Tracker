@@ -3,6 +3,7 @@ package com.personal.thesystem.model
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.DayOfWeek
+import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAdjusters
 
 enum class DecisionStatus { YES, NO }
@@ -50,7 +51,6 @@ data class DailyRecord(
     val sleepReason: ViolationReason? = null,
     val morningReason: ViolationReason? = null,
     val dietReason: DietViolationReason? = null,
-    val studyTask: String = "",
 )
 
 data class SystemSettings(
@@ -70,6 +70,76 @@ data class SystemSettings(
     val hseModeEnabled: Boolean = false,
     val hseFirstClassTime: LocalTime = LocalTime.of(9, 30),
     val hseCommuteMinutes: Int = 45,
+    val hseHomeAddress: String = "",
+    val hseUniversityAddress: String = "Покровский бульвар, 11с4",
+)
+
+enum class AssignmentPriority(val label: String) {
+    NORMAL("ОБЫЧНО"),
+    IMPORTANT("ВАЖНО"),
+}
+
+data class StudyAssignment(
+    val id: Long,
+    val title: String,
+    val subject: String,
+    val dueDate: LocalDate,
+    val priority: AssignmentPriority = AssignmentPriority.NORMAL,
+    val completed: Boolean = false,
+)
+
+enum class MoneyCategory(val id: String, val label: String) {
+    GROCERIES("groceries", "Продукты"),
+    CAFE("cafe", "Кафе и доставка"),
+    TRANSPORT("transport", "Транспорт"),
+    STUDY("study", "Учёба"),
+    HOME("home", "Дом"),
+    SUBSCRIPTIONS("subscriptions", "Связь и подписки"),
+    ENTERTAINMENT("entertainment", "Развлечения"),
+    SHOPPING("shopping", "Покупки"),
+    HEALTH("health", "Здоровье"),
+    OTHER("other", "Другое");
+
+    companion object {
+        fun fromId(id: String?): MoneyCategory = entries.firstOrNull { it.id == id } ?: OTHER
+    }
+}
+
+data class MoneyTransaction(
+    val id: Long,
+    val date: LocalDate,
+    val amountRubles: Long,
+    val category: MoneyCategory,
+    val planned: Boolean,
+)
+
+data class MoneyPeriod(val start: LocalDate, val end: LocalDate)
+
+enum class MoneyStatus { WAITING, CALM, WATCH, SAVE }
+
+data class MoneySnapshot(
+    val period: MoneyPeriod,
+    val transferReceived: Boolean,
+    val carryIn: Long,
+    val spent: Long,
+    val unplannedSpent: Long,
+    val balance: Long,
+    val reserveTarget: Long,
+    val safeToSpend: Long,
+    val safePerDay: Long,
+    val averagePerDay: Long,
+    val projectedSafeEnd: LocalDate?,
+    val status: MoneyStatus,
+    val topCategory: MoneyCategory?,
+)
+
+data class MoneyReport(
+    val period: MoneyPeriod,
+    val income: Long,
+    val spent: Long,
+    val endingBalance: Long,
+    val unplannedSpent: Long,
+    val topCategory: MoneyCategory?,
 )
 
 data class AdmissionState(
@@ -122,7 +192,7 @@ enum class ExperimentFocus(val title: String, val action: String) {
         "Заранее подготовь нормальную еду, чтобы не выбирать сладкое или чипсы на сильном голоде.",
     ),
     DIET_CRAVING(
-        "Тяга без автоматического решения",
+        "Тяга без автоматического выбора",
         "При тяге сначала выпей воды и подожди 10 минут перед выбором еды.",
     ),
     DIET_STRESS(
@@ -130,7 +200,7 @@ enum class ExperimentFocus(val title: String, val action: String) {
         "При стрессе сделай паузу на 10 минут и только потом решай, нужна ли еда.",
     ),
     DIET_SOCIAL(
-        "Решение до угощения",
+        "Выбор до угощения",
         "До встречи заранее реши, что сладкое и чипсы сегодня не входят в план.",
     ),
     DIET_AVAILABLE(
@@ -198,6 +268,92 @@ object SystemLogic {
     const val MIN_CORRELATION_DAYS = 14
     const val WATER_GOAL_QUARTERS = 10
     const val WATER_MAX_QUARTERS = 20
+    const val MONEY_TRANSFER_RUBLES = 20_000L
+    const val MONEY_RESERVE_PER_TRANSFER_RUBLES = 2_000L
+    val MONEY_START_DATE: LocalDate = LocalDate.of(2026, 9, 1)
+
+    fun moneyPeriodFor(date: LocalDate): MoneyPeriod {
+        if (date.isBefore(MONEY_START_DATE)) return MoneyPeriod(MONEY_START_DATE, MONEY_START_DATE.plusDays(14))
+        val start = if (date.dayOfMonth <= 15) date.withDayOfMonth(1) else date.withDayOfMonth(16)
+        val end = if (start.dayOfMonth == 1) start.withDayOfMonth(15) else start.withDayOfMonth(start.lengthOfMonth())
+        return MoneyPeriod(start, end)
+    }
+
+    fun previousMoneyPeriod(date: LocalDate): MoneyPeriod = moneyPeriodFor(moneyPeriodFor(date).start.minusDays(1))
+
+    fun moneySnapshot(
+        date: LocalDate,
+        transactions: Collection<MoneyTransaction>,
+        receivedPeriods: Set<LocalDate>,
+    ): MoneySnapshot {
+        val period = moneyPeriodFor(date)
+        val transfersBefore = receivedPeriods.count { !it.isBefore(MONEY_START_DATE) && it.isBefore(period.start) }
+        val transferReceived = period.start in receivedPeriods
+        val carryIn = transfersBefore * MONEY_TRANSFER_RUBLES - transactions
+            .filter { it.date.isBefore(period.start) }
+            .sumOf { it.amountRubles }
+        val periodTransactions = transactions.filter { !it.date.isBefore(period.start) && !it.date.isAfter(period.end) }
+        val spent = periodTransactions.sumOf { it.amountRubles }
+        val balance = carryIn + (if (transferReceived) MONEY_TRANSFER_RUBLES else 0L) - spent
+        val reserveTarget = (transfersBefore + if (transferReceived) 1 else 0) * MONEY_RESERVE_PER_TRANSFER_RUBLES
+        val safeToSpend = balance - reserveTarget
+        val effectiveDate = date.coerceIn(period.start, period.end)
+        val daysRemaining = ChronoUnit.DAYS.between(effectiveDate, period.end) + 1L
+        val elapsedDays = if (date.isBefore(period.start)) 0L else ChronoUnit.DAYS.between(period.start, effectiveDate) + 1L
+        val safePerDay = safeToSpend.coerceAtLeast(0L) / daysRemaining
+        val averagePerDay = if (elapsedDays == 0L) 0L else spent / elapsedDays
+        val projectedSafeEnd = if (averagePerDay > 0L && safeToSpend > 0L) {
+            effectiveDate.plusDays((safeToSpend + averagePerDay - 1L) / averagePerDay)
+        } else {
+            null
+        }
+        val status = when {
+            !transferReceived -> MoneyStatus.WAITING
+            balance < reserveTarget -> MoneyStatus.SAVE
+            projectedSafeEnd != null && !projectedSafeEnd.isAfter(period.end) -> MoneyStatus.WATCH
+            else -> MoneyStatus.CALM
+        }
+        val topCategory = periodTransactions
+            .groupBy { it.category }
+            .maxByOrNull { (_, values) -> values.sumOf { it.amountRubles } }
+            ?.key
+        return MoneySnapshot(
+            period = period,
+            transferReceived = transferReceived,
+            carryIn = carryIn,
+            spent = spent,
+            unplannedSpent = periodTransactions.filterNot { it.planned }.sumOf { it.amountRubles },
+            balance = balance,
+            reserveTarget = reserveTarget,
+            safeToSpend = safeToSpend,
+            safePerDay = safePerDay,
+            averagePerDay = averagePerDay,
+            projectedSafeEnd = projectedSafeEnd,
+            status = status,
+            topCategory = topCategory,
+        )
+    }
+
+    fun moneyReport(
+        period: MoneyPeriod,
+        transactions: Collection<MoneyTransaction>,
+        receivedPeriods: Set<LocalDate>,
+    ): MoneyReport {
+        val periodTransactions = transactions.filter { !it.date.isBefore(period.start) && !it.date.isAfter(period.end) }
+        val income = if (period.start in receivedPeriods) MONEY_TRANSFER_RUBLES else 0L
+        val endingBalance = receivedPeriods.count { !it.isBefore(MONEY_START_DATE) && !it.isAfter(period.end) } *
+            MONEY_TRANSFER_RUBLES - transactions.filter { !it.date.isAfter(period.end) }.sumOf { it.amountRubles }
+        return MoneyReport(
+            period = period,
+            income = income,
+            spent = periodTransactions.sumOf { it.amountRubles },
+            endingBalance = endingBalance,
+            unplannedSpent = periodTransactions.filterNot { it.planned }.sumOf { it.amountRubles },
+            topCategory = periodTransactions.groupBy { it.category }
+                .maxByOrNull { (_, values) -> values.sumOf { it.amountRubles } }
+                ?.key,
+        )
+    }
 
     fun hseLeaveTime(settings: SystemSettings): LocalTime =
         settings.hseFirstClassTime.minusMinutes(settings.hseCommuteMinutes.toLong())
@@ -219,6 +375,18 @@ object SystemLogic {
 
     fun toggledDecision(current: DecisionStatus?, tapped: DecisionStatus): DecisionStatus? =
         tapped.takeUnless { it == current }
+
+    fun missingTasks(record: DailyRecord): List<DailyTask> =
+        DailyTask.entries.filter { taskStatus(record, it) == null }
+
+    fun shouldShowPreviousDayReminder(
+        today: LocalDate,
+        admissionStart: LocalDate,
+        previousRecord: DailyRecord,
+        lastShownOn: LocalDate?,
+    ): Boolean = !today.minusDays(1).isBefore(admissionStart) &&
+        lastShownOn != today &&
+        missingTasks(previousRecord).isNotEmpty()
 
     fun currentTask(record: DailyRecord, time: LocalTime, digitalCutoff: LocalTime): DailyTask? {
         val order = when {
@@ -500,7 +668,7 @@ object SystemLogic {
             pending.size == tasks.size -> listOf(
                 "Пять задач ждут честной отметки. Начни с первой.",
                 "День пока не отмечен. Выбери «ДА» или «НЕТ» для каждой задачи.",
-                "Ни одного решения ещё нет. Отметь то, что уже можно оценить.",
+                "Ни одной отметки ещё нет. Отметь то, что уже можно оценить.",
             )
 
             completed.size == tasks.size -> listOf(
@@ -518,13 +686,13 @@ object SystemLogic {
             pending.isEmpty() -> listOf(
                 "Выполнено: $completedText. Нарушено: $missedText.",
                 "День отмечен полностью. «ДА»: $completedText; «НЕТ»: $missedText.",
-                "Все решения приняты: выполнено ${completed.size} из 5. Картина дня готова.",
+                "Все задачи отмечены: выполнено ${completed.size} из 5. Картина дня готова.",
             )
 
             missed.isEmpty() -> listOf(
                 "Уже выполнено: $completedText. Осталось отметить: $pendingText.",
                 "Нарушений пока нет. Следующая задача — ${pending.first()}.",
-                "Выполнено ${completed.size} из 5. Ещё ждут решения: $pendingText.",
+                "Выполнено ${completed.size} из 5. Ещё не отмечены: $pendingText.",
             )
 
             completed.isEmpty() -> listOf(
@@ -536,7 +704,7 @@ object SystemLogic {
             else -> listOf(
                 "Выполнено: $completedText. Нарушено: $missedText. Осталось: $pendingText.",
                 "Следующая задача — ${pending.first()}. Уже выполнено ${completed.size} из 5.",
-                "Нарушения не отменяют оставшиеся решения. Ещё ждут: $pendingText.",
+                "Нарушения не отменяют оставшиеся задачи. Ещё ждут: $pendingText.",
             )
         }
     }

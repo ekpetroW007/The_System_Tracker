@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:gravity="center_vertical"
+    android:orientation="vertical"
+    android:padding="18dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.14"
+                android:text="THE SYSTEM"
+                android:textColor="#E8EAEC"
+                android:textSize="12sp" />
+            <TextView
+                android:id="@+id/overview_date"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:fontFamily="sans-serif-medium"
+                android:text="ПЯТНИЦА · 21 АВГ"
+                android:textColor="#899198"
+                android:textSize="10sp" />
+        </LinearLayout>
+        <TextView
+            android:id="@+id/overview_progress"
+            android:layout_width="56dp"
+            android:layout_height="42dp"
+            android:background="@drawable/widget_surface"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:text="0/5"
+            android:textColor="#E8EAEC"
+            android:textSize="20sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/overview_task"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="13dp"
+        android:fontFamily="sans-serif-medium"
+        android:text="СЕЙЧАС · УТРО"
+        android:textColor="#E8EAEC"
+        android:textSize="15sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+        <TextView android:id="@+id/overview_morning" style="@style/WidgetStatus" android:text="●  УТРО" />
+        <TextView android:id="@+id/overview_light" style="@style/WidgetStatus" android:text="●  СВЕТ" />
+        <TextView android:id="@+id/overview_diet" style="@style/WidgetStatus" android:text="●  ЕДА" />
+        <TextView android:id="@+id/overview_water" style="@style/WidgetStatus" android:text="●  ВОДА" />
+        <TextView android:id="@+id/overview_sleep" style="@style/WidgetStatus" android:text="●  СОН" />
+    </LinearLayout>
+</LinearLayout>

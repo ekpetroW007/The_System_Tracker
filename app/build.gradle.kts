@@ -1,4 +1,10 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
+
+val localProperties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
+}
+val mapkitApiKey = localProperties.getProperty("MAPKIT_API_KEY", "")
 
 plugins {
     id("com.android.application")
@@ -14,8 +20,10 @@ android {
         applicationId = "com.personal.thesystem"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.1.0"
+        versionCode = 14
+        versionName = "1.2.4"
+
+        buildConfigField("String", "MAPKIT_API_KEY", "\"${mapkitApiKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -56,6 +64,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("com.yandex.android:maps.mobile:4.42.0-full")
 
     implementation(platform("androidx.compose:compose-bom:2026.06.00"))
     implementation("androidx.compose.ui:ui")

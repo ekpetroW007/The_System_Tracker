@@ -19,6 +19,23 @@ class SystemLogicTest {
     }
 
     @Test
+    fun previousDayReminderAppearsOnceOnlyForAnIncompleteActiveDay() {
+        val today = start.plusDays(1)
+        val incomplete = DailyRecord(start, morning = DecisionStatus.YES)
+        val complete = incomplete.copy(
+            light = DecisionStatus.YES,
+            diet = DecisionStatus.NO,
+            water = DecisionStatus.YES,
+            sleep = DecisionStatus.NO,
+        )
+
+        assertTrue(SystemLogic.shouldShowPreviousDayReminder(today, start, incomplete, null))
+        assertFalse(SystemLogic.shouldShowPreviousDayReminder(today, start, incomplete, today))
+        assertFalse(SystemLogic.shouldShowPreviousDayReminder(today, today, incomplete, null))
+        assertFalse(SystemLogic.shouldShowPreviousDayReminder(today, start, complete, null))
+    }
+
+    @Test
     fun admissionStaysAtLevelOneWithoutSuccess() {
         val records = listOf(
             DailyRecord(start, morning = DecisionStatus.NO),
@@ -247,6 +264,80 @@ class SystemLogicTest {
         assertEquals(LocalTime.of(9, 15), leave)
         assertEquals("До выхода 1 ч 15 мин", SystemLogic.hseCountdown(LocalTime.of(8, 0), leave))
         assertEquals("Время выходить", SystemLogic.hseCountdown(LocalTime.of(9, 20), leave))
+    }
+
+    @Test
+    fun moneyUsesTwoFixedPeriodsPerMonth() {
+        assertEquals(
+            MoneyPeriod(LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 15)),
+            SystemLogic.moneyPeriodFor(LocalDate.of(2026, 8, 24)),
+        )
+        assertEquals(
+            MoneyPeriod(LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 15)),
+            SystemLogic.moneyPeriodFor(LocalDate.of(2026, 9, 15)),
+        )
+        assertEquals(
+            MoneyPeriod(LocalDate.of(2026, 9, 16), LocalDate.of(2026, 9, 30)),
+            SystemLogic.moneyPeriodFor(LocalDate.of(2026, 9, 16)),
+        )
+    }
+
+    @Test
+    fun moneySnapshotCarriesBalanceAndProtectsEachReserve() {
+        val firstPeriod = LocalDate.of(2026, 9, 1)
+        val secondPeriod = LocalDate.of(2026, 9, 16)
+        val transactions = listOf(
+            MoneyTransaction(1, firstPeriod, 15_000, MoneyCategory.GROCERIES, true),
+            MoneyTransaction(2, secondPeriod, 1_000, MoneyCategory.CAFE, false),
+        )
+
+        val snapshot = SystemLogic.moneySnapshot(
+            date = secondPeriod,
+            transactions = transactions,
+            receivedPeriods = setOf(firstPeriod, secondPeriod),
+        )
+
+        assertEquals(5_000, snapshot.carryIn)
+        assertEquals(24_000, snapshot.balance)
+        assertEquals(4_000, snapshot.reserveTarget)
+        assertEquals(20_000, snapshot.safeToSpend)
+        assertEquals(1_000, snapshot.unplannedSpent)
+        assertEquals(MoneyCategory.CAFE, snapshot.topCategory)
+        assertEquals(MoneyStatus.CALM, snapshot.status)
+    }
+
+    @Test
+    fun moneyWaitsForTheRealTransferAndBuildsAReadableReport() {
+        val periodStart = LocalDate.of(2026, 9, 1)
+        val transactions = listOf(
+            MoneyTransaction(1, periodStart, 1_000, MoneyCategory.GROCERIES, true),
+            MoneyTransaction(2, periodStart.plusDays(1), 500, MoneyCategory.CAFE, false),
+        )
+
+        val waiting = SystemLogic.moneySnapshot(periodStart, transactions, emptySet())
+        val active = SystemLogic.moneySnapshot(periodStart.plusDays(2), transactions, setOf(periodStart))
+        val watch = SystemLogic.moneySnapshot(
+            periodStart,
+            listOf(MoneyTransaction(3, periodStart, 2_000, MoneyCategory.ENTERTAINMENT, false)),
+            setOf(periodStart),
+        )
+        val save = SystemLogic.moneySnapshot(
+            periodStart,
+            listOf(MoneyTransaction(4, periodStart, 19_000, MoneyCategory.SHOPPING, false)),
+            setOf(periodStart),
+        )
+        val report = SystemLogic.moneyReport(active.period, transactions, setOf(periodStart))
+
+        assertEquals(MoneyStatus.WAITING, waiting.status)
+        assertEquals(MoneyStatus.WATCH, watch.status)
+        assertEquals(MoneyStatus.SAVE, save.status)
+        assertEquals(18_500, active.balance)
+        assertEquals(16_500, active.safeToSpend)
+        assertEquals(500, active.averagePerDay)
+        assertEquals(20_000, report.income)
+        assertEquals(1_500, report.spent)
+        assertEquals(18_500, report.endingBalance)
+        assertEquals(500, report.unplannedSpent)
     }
 
     @Test

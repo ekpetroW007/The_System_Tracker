@@ -9,4 +9,37 @@
         <item name="android:colorAccent">#D9D9D6</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+
+    <style name="WidgetStatus">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:gravity">center</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">#50575E</item>
+        <item name="android:textSize">8sp</item>
+    </style>
+
+    <style name="WidgetWeekMetric">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:gravity">center</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">#F2EDF4</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="WidgetWeekLabel">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:gravity">center</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">#806F84</item>
+        <item name="android:textSize">7sp</item>
+    </style>
 </resources>
