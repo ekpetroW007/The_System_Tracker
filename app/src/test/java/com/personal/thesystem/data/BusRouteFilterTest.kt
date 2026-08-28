@@ -50,16 +50,16 @@ class BusRouteFilterTest {
     }
 
     @Test
-    fun keepsSavedMorningAndOtherwisePlansTheNextUsefulEightThirty() {
+    fun advancesExpiredMorningPlanAndBuildsForClassArrival() {
         val today = LocalDate.of(2026, 9, 1)
 
         assertEquals(today, plannedMorningDate(today, LocalTime.of(7, 0), null))
         assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(20, 0), null))
-        assertEquals(today, plannedMorningDate(today, LocalTime.of(20, 0), today))
+        assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(20, 0), today))
         assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(7, 0), today.plusDays(1)))
         assertEquals(
-            Instant.parse("2026-09-01T05:30:00Z").toEpochMilli(),
-            routeDepartureEpochMillis(today),
+            Instant.parse("2026-09-01T05:20:00Z").toEpochMilli(),
+            routeArrivalEpochMillis(today, HSE_ROUTE_TIME),
         )
     }
 

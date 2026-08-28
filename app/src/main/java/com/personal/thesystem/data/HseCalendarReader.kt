@@ -17,7 +17,10 @@ data class HseCalendarEvent(
     val end: LocalTime,
     val location: String,
     val calendarName: String,
+    val calendarId: Long = -1L,
 )
+
+data class HseCalendarSource(val id: Long, val name: String)
 
 internal fun selectLikelyHseEvents(events: List<HseCalendarEvent>): List<HseCalendarEvent> {
     val markers = listOf("hse", "вшэ", "вышк")
@@ -28,13 +31,41 @@ internal fun selectLikelyHseEvents(events: List<HseCalendarEvent>): List<HseCale
                 event.location.contains(marker, ignoreCase = true)
         }
     }
-    return (hseEvents.ifEmpty { events })
+    return hseEvents
         .distinctBy { listOf(it.start, it.end, it.title, it.location) }
         .sortedBy(HseCalendarEvent::start)
 }
 
 object HseCalendarReader {
-    fun eventsFor(context: Context, date: LocalDate): List<HseCalendarEvent> {
+    fun calendars(context: Context): List<HseCalendarSource> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            return emptyList()
+        }
+        val projection = arrayOf(
+            CalendarContract.Calendars._ID,
+            CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+            CalendarContract.Calendars.VISIBLE,
+        )
+        return runCatching {
+            context.contentResolver.query(
+                CalendarContract.Calendars.CONTENT_URI,
+                projection,
+                "${CalendarContract.Calendars.VISIBLE} = 1",
+                null,
+                "${CalendarContract.Calendars.CALENDAR_DISPLAY_NAME} ASC",
+            )?.use { cursor ->
+                val id = cursor.getColumnIndexOrThrow(CalendarContract.Calendars._ID)
+                val name = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
+                buildList {
+                    while (cursor.moveToNext()) {
+                        add(HseCalendarSource(cursor.getLong(id), cursor.getString(name).orEmpty().ifBlank { "Календарь" }))
+                    }
+                }
+            }.orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
+    fun eventsFor(context: Context, date: LocalDate, calendarId: Long? = null): List<HseCalendarEvent> {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
             return emptyList()
         }
@@ -52,6 +83,7 @@ object HseCalendarReader {
             CalendarContract.Instances.END,
             CalendarContract.Instances.EVENT_LOCATION,
             CalendarContract.Instances.CALENDAR_DISPLAY_NAME,
+            CalendarContract.Instances.CALENDAR_ID,
             CalendarContract.Instances.ALL_DAY,
         )
 
@@ -68,6 +100,7 @@ object HseCalendarReader {
                 val finish = cursor.getColumnIndexOrThrow(CalendarContract.Instances.END)
                 val location = cursor.getColumnIndexOrThrow(CalendarContract.Instances.EVENT_LOCATION)
                 val calendar = cursor.getColumnIndexOrThrow(CalendarContract.Instances.CALENDAR_DISPLAY_NAME)
+                val sourceId = cursor.getColumnIndexOrThrow(CalendarContract.Instances.CALENDAR_ID)
                 val allDay = cursor.getColumnIndexOrThrow(CalendarContract.Instances.ALL_DAY)
                 buildList {
                     while (cursor.moveToNext()) {
@@ -79,6 +112,7 @@ object HseCalendarReader {
                                 end = Instant.ofEpochMilli(cursor.getLong(finish)).atZone(zone).toLocalTime(),
                                 location = cursor.getString(location).orEmpty(),
                                 calendarName = cursor.getString(calendar).orEmpty(),
+                                calendarId = cursor.getLong(sourceId),
                             )
                         )
                     }
@@ -86,6 +120,12 @@ object HseCalendarReader {
             }.orEmpty()
         }.getOrDefault(emptyList())
 
-        return selectLikelyHseEvents(events)
+        return if (calendarId != null) {
+            events.filter { it.calendarId == calendarId }
+                .distinctBy { listOf(it.start, it.end, it.title, it.location) }
+                .sortedBy(HseCalendarEvent::start)
+        } else {
+            selectLikelyHseEvents(events)
+        }
     }
 }

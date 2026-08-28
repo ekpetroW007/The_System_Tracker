@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.view.View
 import android.widget.RemoteViews
 import com.personal.thesystem.R
+import com.personal.thesystem.MainActivity
 import com.personal.thesystem.data.SystemRepository
 import com.personal.thesystem.model.DailyRecord
 import com.personal.thesystem.model.DecisionStatus
@@ -41,7 +42,6 @@ class WaterWidgetProvider : AppWidgetProvider() {
             else -> return
         }
         SystemRepository(context).adjustWater(LocalDate.now(), delta)
-        WidgetRenderer.updateAll(context)
     }
 }
 
@@ -75,37 +75,38 @@ private object WidgetRenderer {
 
     fun updateAll(context: Context) {
         val manager = AppWidgetManager.getInstance(context)
+        val repository = SystemRepository(context)
         providers.forEach { provider ->
             manager.getAppWidgetIds(ComponentName(context, provider)).forEach { id ->
                 when (provider) {
-                    SystemWidgetProvider::class.java -> overview(context, manager, id)
-                    WaterWidgetProvider::class.java -> water(context, manager, id)
-                    FocusWidgetProvider::class.java -> focus(context, manager, id)
-                    HseWidgetProvider::class.java -> hse(context, manager, id)
-                    WeekWidgetProvider::class.java -> week(context, manager, id)
+                    SystemWidgetProvider::class.java -> overview(context, manager, id, repository)
+                    WaterWidgetProvider::class.java -> water(context, manager, id, repository)
+                    FocusWidgetProvider::class.java -> focus(context, manager, id, repository)
+                    HseWidgetProvider::class.java -> hse(context, manager, id, repository)
+                    WeekWidgetProvider::class.java -> week(context, manager, id, repository)
                 }
             }
         }
     }
 
-    fun overview(context: Context, manager: AppWidgetManager, id: Int) {
-        val repository = SystemRepository(context)
+    fun overview(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
         val record = repository.recordFor(LocalDate.now())
-        val statuses = listOf(record.morning, record.light, record.diet, record.water, record.sleep)
+        val activeTasks = SystemLogic.activeTasks(LocalDate.now(), repository.settings)
+        val statuses = activeTasks.map { SystemLogic.statusFor(record, it) }
+        val allStatuses = listOf(record.morning, record.light, record.diet, record.water, record.sleep)
         val views = RemoteViews(context.packageName, R.layout.widget_overview).apply {
             setTextViewText(R.id.overview_date, todayLabel())
-            setTextViewText(R.id.overview_progress, "${statuses.count { it == DecisionStatus.YES }}/5")
+            setTextViewText(R.id.overview_progress, "${statuses.count { it == DecisionStatus.YES }}/${statuses.size}")
             setTextViewText(R.id.overview_task, currentLabel(record, repository))
             listOf(R.id.overview_morning, R.id.overview_light, R.id.overview_diet, R.id.overview_water, R.id.overview_sleep)
-                .zip(statuses)
+                .zip(allStatuses)
                 .forEach { (viewId, status) -> setTextColor(viewId, statusColor(status)) }
-            bindOpen(context, id, this)
+            bindOpen(context, id, this, "today")
         }
         manager.updateAppWidget(id, views)
     }
 
-    fun water(context: Context, manager: AppWidgetManager, id: Int) {
-        val repository = SystemRepository(context)
+    fun water(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
         val quarters = SystemLogic.waterQuarters(repository.recordFor(LocalDate.now())) ?: 0
         val percent = (quarters * 100 / SystemLogic.WATER_GOAL_QUARTERS).coerceIn(0, 100)
         val views = RemoteViews(context.packageName, R.layout.widget_water).apply {
@@ -114,13 +115,12 @@ private object WidgetRenderer {
             setProgressBar(R.id.water_progress, 100, percent, false)
             setOnClickPendingIntent(R.id.water_minus, waterAction(context, id + 20_000, ACTION_WATER_MINUS))
             setOnClickPendingIntent(R.id.water_plus, waterAction(context, id + 30_000, ACTION_WATER_PLUS))
-            bindOpen(context, id + 40_000, this)
+            bindOpen(context, id + 40_000, this, "water")
         }
         manager.updateAppWidget(id, views)
     }
 
-    fun focus(context: Context, manager: AppWidgetManager, id: Int) {
-        val repository = SystemRepository(context)
+    fun focus(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
         val record = repository.recordFor(LocalDate.now())
         val task = SystemLogic.recoveryTask(record, LocalTime.now(), repository.settings.digitalCutoff)
             ?: SystemLogic.currentTask(record, LocalTime.now(), repository.settings.digitalCutoff)
@@ -128,20 +128,23 @@ private object WidgetRenderer {
             setTextViewText(R.id.focus_title, task?.title ?: "ДЕЛО СДЕЛАНО")
             setTextViewText(R.id.focus_action, task?.recoveryAction ?: "Все пять задач закрыты. Супер!")
             setTextViewText(R.id.focus_time, LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")))
-            bindOpen(context, id + 50_000, this)
+            bindOpen(context, id + 50_000, this, "today")
         }
         manager.updateAppWidget(id, views)
     }
 
-    fun hse(context: Context, manager: AppWidgetManager, id: Int) {
-        val repository = SystemRepository(context)
+    fun hse(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
         val settings = repository.settings
         val activeAssignments = repository.assignments.count { !it.completed }
         val views = RemoteViews(context.packageName, R.layout.widget_hse).apply {
             if (settings.hseModeEnabled) {
-                val leave = SystemLogic.hseLeaveTime(settings)
-                setTextViewText(R.id.hse_countdown, SystemLogic.hseCountdown(LocalTime.now(), leave))
-                setTextViewText(R.id.hse_times, "ПАРА ${SystemLogic.formatTime(settings.hseFirstClassTime)}  ·  ВЫХОД ${SystemLogic.formatTime(leave)}")
+                val plan = repository.hseTransitPlan
+                val leaveText = plan?.route?.leaveHomeTime?.takeIf { it.isNotBlank() }
+                setTextViewText(R.id.hse_countdown, leaveText?.let { "Выйти в $it" } ?: "Маршрут обновится в приложении")
+                setTextViewText(
+                    R.id.hse_times,
+                    plan?.let { "ПАРА ${SystemLogic.formatTime(it.targetTime)}  ·  АВТОБУС ${it.route.lines}" } ?: "ОТКРОЙ РЕЖИМ ВШЭ",
+                )
                 setTextViewText(R.id.hse_task, "Заданий: $activeAssignments")
                 setViewVisibility(R.id.hse_dot, View.VISIBLE)
             } else {
@@ -150,13 +153,12 @@ private object WidgetRenderer {
                 setTextViewText(R.id.hse_task, "Пары, маршрут и задания — в одном месте")
                 setViewVisibility(R.id.hse_dot, View.INVISIBLE)
             }
-            bindOpen(context, id + 60_000, this)
+            bindOpen(context, id + 60_000, this, "hse")
         }
         manager.updateAppWidget(id, views)
     }
 
-    fun week(context: Context, manager: AppWidgetManager, id: Int) {
-        val repository = SystemRepository(context)
+    fun week(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
         val report = SystemLogic.weeklyReport(LocalDate.now(), repository.records.values, repository.experimentFeedback)
         val values = report.metrics.map { it.value?.let { value -> "$value%" } ?: "—" }
         val views = RemoteViews(context.packageName, R.layout.widget_week).apply {
@@ -167,7 +169,7 @@ private object WidgetRenderer {
             setTextViewText(R.id.week_water, values[3])
             setTextViewText(R.id.week_sleep, values[4])
             setTextViewText(R.id.week_decision, report.weakest?.let { "ФОКУС · $it" } ?: "НЕДЕЛЯ ТОЛЬКО НАЧАЛАСЬ")
-            bindOpen(context, id + 70_000, this)
+            bindOpen(context, id + 70_000, this, "week")
         }
         manager.updateAppWidget(id, views)
     }
@@ -199,17 +201,19 @@ private object WidgetRenderer {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-    private fun bindOpen(context: Context, requestCode: Int, views: RemoteViews) {
-        context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { launch ->
-            views.setOnClickPendingIntent(
-                R.id.widget_root,
-                PendingIntent.getActivity(
-                    context,
-                    requestCode,
-                    launch,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                ),
-            )
+    private fun bindOpen(context: Context, requestCode: Int, views: RemoteViews, destination: String) {
+        val launch = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_DESTINATION, destination)
         }
+        views.setOnClickPendingIntent(
+            R.id.widget_root,
+            PendingIntent.getActivity(
+                context,
+                requestCode,
+                launch,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ),
+        )
     }
 }

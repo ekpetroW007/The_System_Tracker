@@ -2,33 +2,36 @@ package com.personal.thesystem
 
 import android.graphics.Color
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.personal.thesystem.data.SystemRepository
 import com.personal.thesystem.notifications.ReminderScheduler
 import com.personal.thesystem.ui.SystemApp
 import com.personal.thesystem.ui.theme.TheSystemTheme
-import com.yandex.mapkit.MapKitFactory
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: SystemRepository
+    private var destination by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        MapKitFactory.setApiKey(BuildConfig.MAPKIT_API_KEY)
-        MapKitFactory.initialize(this)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         repository = SystemRepository(applicationContext)
+        destination = intent.getStringExtra(EXTRA_DESTINATION)
         ReminderScheduler.scheduleAll(this, repository.settings)
         setContent {
             TheSystemTheme {
-                SystemApp(remember { repository })
+                SystemApp(remember { repository }, destination) { destination = null }
             }
         }
     }
@@ -41,13 +44,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        MapKitFactory.getInstance().onStart()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        destination = intent.getStringExtra(EXTRA_DESTINATION)
     }
 
-    override fun onStop() {
-        MapKitFactory.getInstance().onStop()
-        super.onStop()
+    companion object {
+        const val EXTRA_DESTINATION = "destination"
     }
+
 }

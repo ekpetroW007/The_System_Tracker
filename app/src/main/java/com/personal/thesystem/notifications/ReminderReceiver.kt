@@ -33,11 +33,12 @@ class ReminderReceiver : BroadcastReceiver() {
             500,
             Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(MainActivity.EXTRA_DESTINATION, type.destination)
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val notification = NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_ID)
+        val notification = NotificationCompat.Builder(context, type.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(type.title)
             .setContentText(type.message)
@@ -59,5 +60,22 @@ class ReminderReceiver : BroadcastReceiver() {
 
     companion object {
         const val EXTRA_TYPE = "reminder_type"
+
+        fun showTest(context: Context) {
+            ReminderScheduler.createChannel(context)
+            val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if (!permissionGranted) return
+            NotificationManagerCompat.from(context).notify(
+                499,
+                NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_CHECK_INS)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setContentTitle("The System на связи")
+                    .setContentText("Тестовое напоминание работает. Остальное придёт по твоему расписанию.")
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setAutoCancel(true)
+                    .build(),
+            )
+        }
     }
 }

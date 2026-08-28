@@ -15,9 +15,9 @@ class HseCalendarReaderTest {
     }
 
     @Test
-    fun fallsBackToAllTimedEventsWhenCalendarHasNoHseLabel() {
+    fun doesNotLeakPersonalEventsWhenCalendarHasNoHseLabel() {
         val event = HseCalendarEvent("Математика", LocalTime.of(9, 30), LocalTime.of(10, 50), "", "Календарь")
 
-        assertEquals(listOf(event), selectLikelyHseEvents(listOf(event)))
+        assertEquals(emptyList<HseCalendarEvent>(), selectLikelyHseEvents(listOf(event)))
     }
 }

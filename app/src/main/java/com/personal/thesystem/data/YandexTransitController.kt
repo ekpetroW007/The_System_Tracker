@@ -39,13 +39,16 @@ data class TransitOption(
     val busArrivalTime: String,
     val walkToStopMeters: Int,
     val walkToUniversityMeters: Int,
+    val leaveHomeTime: String = "",
 )
 
 data class HseTransitPlan(
     val route: TransitOption,
     val targetDate: LocalDate,
+    val targetTime: LocalTime = HSE_ROUTE_TIME,
     val homeAddress: String,
     val universityAddress: String,
+    val generatedAtEpochMillis: Long = System.currentTimeMillis(),
 )
 
 internal fun isBusLine(vehicleTypes: List<String>): Boolean = "bus" in vehicleTypes
@@ -92,13 +95,14 @@ internal fun plannedMorningDate(
     now: LocalTime,
     cachedDate: LocalDate?,
 ): LocalDate = when {
-    cachedDate != null && !cachedDate.isBefore(today) -> cachedDate
+    cachedDate != null && cachedDate.isAfter(today) -> cachedDate
+    cachedDate == today && now.isBefore(HSE_ROUTE_TIME) -> cachedDate
     now.isBefore(HSE_ROUTE_TIME) -> today
     else -> today.plusDays(1)
 }
 
-internal fun routeDepartureEpochMillis(date: LocalDate): Long = date
-    .atTime(HSE_ROUTE_TIME)
+internal fun routeArrivalEpochMillis(date: LocalDate, classTime: LocalTime): Long = date
+    .atTime(classTime.minusMinutes(10))
     .atZone(MOSCOW_ZONE)
     .toInstant()
     .toEpochMilli()
@@ -133,6 +137,7 @@ class YandexTransitController {
         homeAddress: String,
         universityAddress: String,
         targetDate: LocalDate,
+        targetTime: LocalTime,
         onReady: (HseTransitPlan) -> Unit,
     ) {
         if (homeAddress.isBlank()) {
@@ -153,6 +158,7 @@ class YandexTransitController {
                     homeAddress = homeAddress,
                     universityAddress = universityAddress,
                     targetDate = targetDate,
+                    targetTime = targetTime,
                     token = token,
                     onReady = onReady,
                 )
@@ -199,6 +205,7 @@ class YandexTransitController {
         homeAddress: String,
         universityAddress: String,
         targetDate: LocalDate,
+        targetTime: LocalTime,
         token: Int,
         onReady: (HseTransitPlan) -> Unit,
     ) {
@@ -210,13 +217,13 @@ class YandexTransitController {
             override fun onMasstransitRoutes(routes: MutableList<Route>) {
                 if (token != requestToken) return
                 val route = prioritizeNearestBusOptions(
-                    routes.mapNotNull { route -> toBusTransitOption(route, home, university) },
+                    routes.mapNotNull { route -> toBusTransitOption(route, home, university, targetTime) },
                 ).firstOrNull()
                 if (route == null) {
-                    state = TransitRoutesState.Failed("На 08:30 прямой автобус до ВШЭ не найден")
+                    state = TransitRoutesState.Failed("К ${targetTime} прямой автобус до ВШЭ не найден")
                     return
                 }
-                val plan = HseTransitPlan(route, targetDate, homeAddress, universityAddress)
+                val plan = HseTransitPlan(route, targetDate, targetTime, homeAddress, universityAddress)
                 onReady(plan)
                 state = TransitRoutesState.Ready(plan)
             }
@@ -231,14 +238,14 @@ class YandexTransitController {
             points,
             TransitOptions(
                 BUS_ONLY_AVOID_MASK,
-                TimeOptions(routeDepartureEpochMillis(targetDate), null),
+                TimeOptions(null, routeArrivalEpochMillis(targetDate, targetTime)),
             ),
             RouteOptions(FitnessOptions(false, false)),
             routeListener!!,
         )
     }
 
-    private fun toBusTransitOption(route: Route, home: Point, university: Point): TransitOption? {
+    private fun toBusTransitOption(route: Route, home: Point, university: Point, targetTime: LocalTime): TransitOption? {
         val indexedRideSections = route.sections.withIndex()
             .filter { it.value.metadata.data.transports != null }
         val rideSections = indexedRideSections.map { it.value }
@@ -299,6 +306,7 @@ class YandexTransitController {
             busArrivalTime = busArrivalTime,
             walkToStopMeters = walkToStopMeters,
             walkToUniversityMeters = walkToUniversityMeters,
+            leaveHomeTime = targetTime.minusMinutes(totalMinutes.toLong() + 10L).toString(),
         )
     }
 

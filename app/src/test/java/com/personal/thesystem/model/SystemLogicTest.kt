@@ -32,6 +32,23 @@ class SystemLogicTest {
     }
 
     @Test
+    fun everyReminderStopsAfterItsTaskIsAnswered() {
+        val record = DailyRecord(
+            start,
+            morning = DecisionStatus.NO,
+            diet = DecisionStatus.YES,
+            sleep = DecisionStatus.NO,
+        )
+
+        assertFalse(ReminderType.MORNING.shouldNotify(record))
+        assertFalse(ReminderType.DIET.shouldNotify(record))
+        assertFalse(ReminderType.WARNING.shouldNotify(record))
+        assertFalse(ReminderType.CUTOFF.shouldNotify(record))
+        assertFalse(ReminderType.PREPARATION.shouldNotify(record))
+        assertFalse(ReminderType.BED.shouldNotify(record))
+    }
+
+    @Test
     fun repeatedDecisionTapClearsTheSelection() {
         assertEquals(DecisionStatus.YES, SystemLogic.toggledDecision(null, DecisionStatus.YES))
         assertEquals(DecisionStatus.NO, SystemLogic.toggledDecision(DecisionStatus.YES, DecisionStatus.NO))
@@ -126,6 +143,16 @@ class SystemLogicTest {
             DailyRecord(start.plusDays(2)),
         )
         assertEquals(50, SystemLogic.compliance(records) { it.sleep })
+        assertEquals(ComplianceStat(50, 2, 30), SystemLogic.complianceStat(records, 30) { it.sleep })
+    }
+
+    @Test
+    fun lightLeavesTheDailySystemAfterTheThirtyDayPlan() {
+        val settings = SystemSettings(lightStart = start)
+
+        assertTrue(DailyTask.LIGHT in SystemLogic.activeTasks(start.plusDays(29), settings))
+        assertFalse(DailyTask.LIGHT in SystemLogic.activeTasks(start.plusDays(30), settings))
+        assertEquals(4, SystemLogic.activeTasks(start.plusDays(30), settings).size)
     }
 
     @Test
@@ -325,6 +352,23 @@ class SystemLogicTest {
         assertEquals(1_000, snapshot.unplannedSpent)
         assertEquals(MoneyCategory.CAFE, snapshot.topCategory)
         assertEquals(MoneyStatus.CALM, snapshot.status)
+    }
+
+    @Test
+    fun mandatoryMoneyCommitmentsReduceTheSafeDailyBudget() {
+        val periodStart = LocalDate.of(2026, 9, 1)
+        val snapshot = SystemLogic.moneySnapshot(
+            date = periodStart,
+            transactions = emptyList(),
+            receivedPeriods = setOf(periodStart),
+            commitments = listOf(MoneyCommitment(1L, "Транспорт", 3_000L, MoneyCategory.TRANSPORT)),
+            transferRubles = 22_000L,
+            reservePerTransferRubles = 2_000L,
+        )
+
+        assertEquals(3_000L, snapshot.mandatoryRemaining)
+        assertEquals(17_000L, snapshot.safeToSpend)
+        assertEquals(22_000L, snapshot.balance)
     }
 
     @Test

@@ -8,6 +8,12 @@ import java.time.temporal.TemporalAdjusters
 
 enum class DecisionStatus { YES, NO }
 
+enum class SleepViolationPart(val label: String) {
+    CUTOFF("Цифровой отбой"),
+    BED("Время в кровати"),
+    BOTH("Оба правила"),
+}
+
 enum class DailyTask(val title: String, val recoveryAction: String) {
     MORNING("УТРО", "Сделай отжимания сразу после подъёма."),
     LIGHT("СВЕТ", "Открой шторы и выполни текущий этап света."),
@@ -29,11 +35,11 @@ enum class ViolationReason(val id: String, val label: String) {
 
 enum class DietViolationReason(val id: String, val label: String) {
     HUNGER("hunger", "Сильный голод"),
-    CRAVING("craving", "Сильная тяга"),
+    CRAVING("craving", "Купил по дороге"),
     STRESS("stress", "Стресс / грусть"),
     SOCIAL("social", "Компания / угощение"),
-    AVAILABLE("available", "Было под рукой"),
-    HABIT("habit", "По привычке");
+    AVAILABLE("available", "Сладкое было дома"),
+    HABIT("habit", "Не было нормальной еды");
 
     companion object {
         fun fromId(id: String?): DietViolationReason? = entries.firstOrNull { it.id == id }
@@ -51,6 +57,8 @@ data class DailyRecord(
     val sleepReason: ViolationReason? = null,
     val morningReason: ViolationReason? = null,
     val dietReason: DietViolationReason? = null,
+    val sleepViolationPart: SleepViolationPart? = null,
+    val morningRepetitions: Int? = null,
 )
 
 data class SystemSettings(
@@ -64,8 +72,9 @@ data class SystemSettings(
     val preparationEnabled: Boolean = true,
     val bedEnabled: Boolean = true,
     val morningEnabled: Boolean = true,
-    val morningMusicEnabled: Boolean = true,
+    val morningMusicEnabled: Boolean = false,
     val dietEnabled: Boolean = true,
+    val reduceMotion: Boolean = false,
     val admissionStart: LocalDate = LocalDate.now(),
     val lightStart: LocalDate = LocalDate.now(),
     val hseModeEnabled: Boolean = false,
@@ -73,6 +82,10 @@ data class SystemSettings(
     val hseCommuteMinutes: Int = 45,
     val hseHomeAddress: String = "",
     val hseUniversityAddress: String = "Покровский бульвар, 11с4",
+    val hseCalendarId: Long? = null,
+    val hseCalendarName: String = "",
+    val moneyTransferRubles: Long = 20_000L,
+    val moneyReservePerTransferRubles: Long = 2_000L,
 )
 
 enum class AssignmentPriority(val label: String) {
@@ -114,6 +127,13 @@ data class MoneyTransaction(
     val planned: Boolean,
 )
 
+data class MoneyCommitment(
+    val id: Long,
+    val title: String,
+    val amountRubles: Long,
+    val category: MoneyCategory,
+)
+
 data class MoneyPeriod(val start: LocalDate, val end: LocalDate)
 
 enum class MoneyStatus { WAITING, CALM, WATCH, SAVE }
@@ -126,6 +146,7 @@ data class MoneySnapshot(
     val unplannedSpent: Long,
     val balance: Long,
     val reserveTarget: Long,
+    val mandatoryRemaining: Long,
     val safeToSpend: Long,
     val safePerDay: Long,
     val averagePerDay: Long,
@@ -248,7 +269,14 @@ data class CorrelationAnalysis(
     val requiredDays: Int,
 )
 
-data class WeeklyMetric(val label: String, val value: Int?)
+data class ComplianceStat(val value: Int?, val answered: Int, val eligible: Int)
+
+data class WeeklyMetric(
+    val label: String,
+    val value: Int?,
+    val answered: Int = 0,
+    val eligible: Int = 0,
+)
 
 data class WeeklyReport(
     val weekStart: LocalDate,
@@ -296,18 +324,22 @@ object SystemLogic {
         date: LocalDate,
         transactions: Collection<MoneyTransaction>,
         receivedPeriods: Set<LocalDate>,
+        commitments: Collection<MoneyCommitment> = emptyList(),
+        transferRubles: Long = MONEY_TRANSFER_RUBLES,
+        reservePerTransferRubles: Long = MONEY_RESERVE_PER_TRANSFER_RUBLES,
     ): MoneySnapshot {
         val period = moneyPeriodFor(date)
         val transfersBefore = receivedPeriods.count { !it.isBefore(MONEY_START_DATE) && it.isBefore(period.start) }
         val transferReceived = period.start in receivedPeriods
-        val carryIn = transfersBefore * MONEY_TRANSFER_RUBLES - transactions
+        val carryIn = transfersBefore * transferRubles - transactions
             .filter { it.date.isBefore(period.start) }
             .sumOf { it.amountRubles }
         val periodTransactions = transactions.filter { !it.date.isBefore(period.start) && !it.date.isAfter(period.end) }
         val spent = periodTransactions.sumOf { it.amountRubles }
-        val balance = carryIn + (if (transferReceived) MONEY_TRANSFER_RUBLES else 0L) - spent
-        val reserveTarget = (transfersBefore + if (transferReceived) 1 else 0) * MONEY_RESERVE_PER_TRANSFER_RUBLES
-        val safeToSpend = balance - reserveTarget
+        val balance = carryIn + (if (transferReceived) transferRubles else 0L) - spent
+        val reserveTarget = (transfersBefore + if (transferReceived) 1 else 0) * reservePerTransferRubles
+        val mandatoryRemaining = commitments.sumOf { it.amountRubles }
+        val safeToSpend = balance - reserveTarget - mandatoryRemaining
         val effectiveDate = date.coerceIn(period.start, period.end)
         val daysRemaining = ChronoUnit.DAYS.between(effectiveDate, period.end) + 1L
         val elapsedDays = if (date.isBefore(period.start)) 0L else ChronoUnit.DAYS.between(period.start, effectiveDate) + 1L
@@ -336,6 +368,7 @@ object SystemLogic {
             unplannedSpent = periodTransactions.filterNot { it.planned }.sumOf { it.amountRubles },
             balance = balance,
             reserveTarget = reserveTarget,
+            mandatoryRemaining = mandatoryRemaining,
             safeToSpend = safeToSpend,
             safePerDay = safePerDay,
             averagePerDay = averagePerDay,
@@ -349,11 +382,12 @@ object SystemLogic {
         period: MoneyPeriod,
         transactions: Collection<MoneyTransaction>,
         receivedPeriods: Set<LocalDate>,
+        transferRubles: Long = MONEY_TRANSFER_RUBLES,
     ): MoneyReport {
         val periodTransactions = transactions.filter { !it.date.isBefore(period.start) && !it.date.isAfter(period.end) }
-        val income = if (period.start in receivedPeriods) MONEY_TRANSFER_RUBLES else 0L
+        val income = if (period.start in receivedPeriods) transferRubles else 0L
         val endingBalance = receivedPeriods.count { !it.isBefore(MONEY_START_DATE) && !it.isAfter(period.end) } *
-            MONEY_TRANSFER_RUBLES - transactions.filter { !it.date.isAfter(period.end) }.sumOf { it.amountRubles }
+            transferRubles - transactions.filter { !it.date.isAfter(period.end) }.sumOf { it.amountRubles }
         return MoneyReport(
             period = period,
             income = income,
@@ -387,31 +421,52 @@ object SystemLogic {
     fun toggledDecision(current: DecisionStatus?, tapped: DecisionStatus): DecisionStatus? =
         tapped.takeUnless { it == current }
 
-    fun missingTasks(record: DailyRecord): List<DailyTask> =
-        DailyTask.entries.filter { taskStatus(record, it) == null }
+    fun activeTasks(date: LocalDate, settings: SystemSettings): List<DailyTask> =
+        DailyTask.entries.filterNot { it == DailyTask.LIGHT && lightPlanFor(date, settings.lightStart).completed }
+
+    fun missingTasks(
+        record: DailyRecord,
+        activeTasks: Collection<DailyTask> = DailyTask.entries,
+    ): List<DailyTask> = activeTasks.filter { taskStatus(record, it) == null }
 
     fun shouldShowPreviousDayReminder(
         today: LocalDate,
         admissionStart: LocalDate,
         previousRecord: DailyRecord,
         lastShownOn: LocalDate?,
+        lightStart: LocalDate = admissionStart,
     ): Boolean = !today.minusDays(1).isBefore(admissionStart) &&
         lastShownOn != today &&
-        missingTasks(previousRecord).isNotEmpty()
+        missingTasks(
+            previousRecord,
+            DailyTask.entries.filterNot {
+                it == DailyTask.LIGHT && lightPlanFor(previousRecord.date, lightStart).completed
+            },
+        ).isNotEmpty()
 
-    fun currentTask(record: DailyRecord, time: LocalTime, digitalCutoff: LocalTime): DailyTask? {
+    fun currentTask(
+        record: DailyRecord,
+        time: LocalTime,
+        digitalCutoff: LocalTime,
+        activeTasks: Collection<DailyTask> = DailyTask.entries,
+    ): DailyTask? {
         val order = when {
             !time.isBefore(digitalCutoff) -> listOf(DailyTask.SLEEP, DailyTask.WATER, DailyTask.DIET, DailyTask.LIGHT, DailyTask.MORNING)
             time.hour >= 21 -> listOf(DailyTask.DIET, DailyTask.WATER, DailyTask.SLEEP, DailyTask.LIGHT, DailyTask.MORNING)
             time.hour < 12 -> listOf(DailyTask.MORNING, DailyTask.LIGHT, DailyTask.WATER, DailyTask.DIET, DailyTask.SLEEP)
             else -> listOf(DailyTask.LIGHT, DailyTask.WATER, DailyTask.DIET, DailyTask.SLEEP, DailyTask.MORNING)
         }
-        return order.firstOrNull { taskStatus(record, it) == null }
+        return order.firstOrNull { it in activeTasks && taskStatus(record, it) == null }
     }
 
-    fun recoveryTask(record: DailyRecord, time: LocalTime, digitalCutoff: LocalTime): DailyTask? {
-        val failures = DailyTask.entries.count { taskStatus(record, it) == DecisionStatus.NO }
-        return currentTask(record, time, digitalCutoff).takeIf { failures >= 2 }
+    fun recoveryTask(
+        record: DailyRecord,
+        time: LocalTime,
+        digitalCutoff: LocalTime,
+        activeTasks: Collection<DailyTask> = DailyTask.entries,
+    ): DailyTask? {
+        val failures = activeTasks.count { taskStatus(record, it) == DecisionStatus.NO }
+        return currentTask(record, time, digitalCutoff, activeTasks).takeIf { failures >= 2 }
     }
 
     private fun taskStatus(record: DailyRecord, task: DailyTask): DecisionStatus? = when (task) {
@@ -421,6 +476,8 @@ object SystemLogic {
         DailyTask.WATER -> record.water
         DailyTask.SLEEP -> record.sleep
     }
+
+    fun statusFor(record: DailyRecord, task: DailyTask): DecisionStatus? = taskStatus(record, task)
 
     fun waterQuarters(record: DailyRecord): Int? = record.waterQuarterLiters ?: when (record.water) {
         DecisionStatus.YES -> WATER_GOAL_QUARTERS
@@ -479,6 +536,17 @@ object SystemLogic {
         val decisions = records.mapNotNull(selector)
         if (decisions.isEmpty()) return null
         return (decisions.count { it == DecisionStatus.YES } * 100f / decisions.size).toInt()
+    }
+
+    fun complianceStat(
+        records: Collection<DailyRecord>,
+        eligible: Int = records.size,
+        selector: (DailyRecord) -> DecisionStatus?,
+    ): ComplianceStat {
+        val decisions = records.mapNotNull(selector)
+        val value = decisions.takeIf { it.isNotEmpty() }
+            ?.let { answered -> answered.count { it == DecisionStatus.YES } * 100 / answered.size }
+        return ComplianceStat(value, decisions.size, eligible.coerceAtLeast(decisions.size))
     }
 
     fun weeklyExperiment(
@@ -611,12 +679,17 @@ object SystemLogic {
         val weekStart = date.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
         val weekEnd = weekStart.plusDays(6)
         val weekRecords = records.filter { !it.date.isBefore(weekStart) && !it.date.isAfter(weekEnd) }
+        val eligibleDays = (ChronoUnit.DAYS.between(weekStart, minOf(date, weekEnd)) + 1L).toInt().coerceAtLeast(0)
+        fun metric(label: String, selector: (DailyRecord) -> DecisionStatus?): WeeklyMetric {
+            val stat = complianceStat(weekRecords, eligibleDays, selector)
+            return WeeklyMetric(label, stat.value, stat.answered, stat.eligible)
+        }
         val metrics = listOf(
-            WeeklyMetric("УТРО", compliance(weekRecords) { it.morning }),
-            WeeklyMetric("СВЕТ", compliance(weekRecords) { it.light }),
-            WeeklyMetric("ПИТАНИЕ", compliance(weekRecords) { it.diet }),
-            WeeklyMetric("ВОДА", compliance(weekRecords) { it.water }),
-            WeeklyMetric("СОН", compliance(weekRecords) { it.sleep }),
+            metric("УТРО") { it.morning },
+            metric("СВЕТ") { it.light },
+            metric("ПИТАНИЕ") { it.diet },
+            metric("ВОДА") { it.water },
+            metric("СОН") { it.sleep },
         )
         val allDecisions = weekRecords.flatMap { listOfNotNull(it.morning, it.light, it.diet, it.water, it.sleep) }
         val measured = metrics.filter { it.value != null }

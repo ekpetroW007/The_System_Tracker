@@ -24,12 +24,13 @@ class MorningMusicActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val settings = SystemRepository(this).settings
-        if (!settings.morningMusicEnabled) {
+        val manualTest = intent.getBooleanExtra("manual_test", false)
+        if (!settings.morningMusicEnabled && !manualTest) {
             ReminderScheduler.cancelMusic(this)
             finish()
             return
         }
-        ReminderScheduler.scheduleMusic(this)
+        if (!manualTest) ReminderScheduler.scheduleMusic(this)
 
         val artist = SystemLogic.morningArtistFor(LocalDate.now().dayOfWeek)
         val playIntent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
@@ -48,6 +49,7 @@ class MorningMusicActivity : ComponentActivity() {
         }
 
         runCatching { startActivity(destination) }
+            .onSuccess { ReminderScheduler.markMusicLaunch(this, LocalDate.now()) }
         finish()
     }
 
@@ -64,14 +66,19 @@ class MorningMusicWatchdogReceiver : BroadcastReceiver() {
             return
         }
 
+        if (ReminderScheduler.wasMusicLaunched(context, LocalDate.now())) {
+            ReminderScheduler.scheduleMusic(context)
+            return
+        }
+
         ReminderScheduler.scheduleMusic(context)
         ReminderScheduler.createChannel(context)
         val artist = SystemLogic.morningArtistFor(LocalDate.now().dayOfWeek)
-        val notification = NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_ID)
+        val notification = NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_MUSIC)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Музыка на утро · $artist")
-            .setContentText("Автозапуск не сработал. Нажми, чтобы включить исполнителя в Яндекс Музыке.")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("Автозапуск не сработал. Нажми, чтобы включить исполнителя в Яндекс Музыке."))
+            .setContentText("Если музыка ещё не играет, нажми — открою исполнителя дня.")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("Если музыка ещё не играет, нажми — открою исполнителя дня."))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)

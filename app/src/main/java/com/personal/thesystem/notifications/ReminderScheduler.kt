@@ -30,11 +30,31 @@ enum class ReminderType(
     DIET(406, "Как прошло питание сегодня?", "Загляни в The System и отметь «ДА» или «НЕТ»: без сладкого и без чипсов. Газировку можно."),
     ;
 
-    fun shouldNotify(record: DailyRecord): Boolean = this != DIET || record.diet == null
+    val channelId: String
+        get() = when (this) {
+            WARNING, CUTOFF, PREPARATION, BED -> ReminderScheduler.CHANNEL_EVENING
+            MORNING, DIET -> ReminderScheduler.CHANNEL_CHECK_INS
+        }
+
+    val destination: String
+        get() = when (this) {
+            WARNING, CUTOFF, PREPARATION, BED -> "sleep"
+            MORNING -> "morning"
+            DIET -> "diet"
+        }
+
+    fun shouldNotify(record: DailyRecord): Boolean = when (this) {
+        WARNING, CUTOFF, PREPARATION, BED -> record.sleep == null
+        MORNING -> record.morning == null
+        DIET -> record.diet == null
+    }
 }
 
 object ReminderScheduler {
-    const val CHANNEL_ID = "system_reminders"
+    const val CHANNEL_EVENING = "system_evening"
+    const val CHANNEL_CHECK_INS = "system_check_ins"
+    const val CHANNEL_MUSIC = "system_music"
+    const val CHANNEL_STUDY = "system_study"
     private const val MUSIC_REQUEST_CODE = 407
     private const val MUSIC_WATCHDOG_REQUEST_CODE = 408
     private val MUSIC_TIME: LocalTime = LocalTime.of(7, 30)
@@ -43,25 +63,31 @@ object ReminderScheduler {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
 
-    fun exactAlarmPermissionIntent(context: Context): Intent =
+    fun exactAlarmPermissionIntent(context: Context): Intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         Intent(
             Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
             Uri.parse("package:${context.packageName}"),
         )
+    } else {
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+    }
 
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Напоминания Системы",
-                    NotificationManager.IMPORTANCE_HIGH,
-                ).apply {
-                    description = "Питание, цифровой отбой, подготовка ко сну, отжимания и утренняя музыка"
-                    enableVibration(true)
-                }
-            )
+            listOf(
+                Triple(CHANNEL_EVENING, "Вечер и сон", "Цифровой отбой и подготовка ко сну"),
+                Triple(CHANNEL_CHECK_INS, "Ежедневные отметки", "Утро, питание и незакрытые задачи"),
+                Triple(CHANNEL_MUSIC, "Утренняя музыка", "Запуск исполнителя дня и запасная кнопка"),
+                Triple(CHANNEL_STUDY, "Учёба", "Расписание, дорога и занятия ВШЭ"),
+            ).forEach { (id, name, description) ->
+                manager.createNotificationChannel(
+                    NotificationChannel(id, name, NotificationManager.IMPORTANCE_HIGH).apply {
+                        this.description = description
+                        enableVibration(true)
+                    }
+                )
+            }
         }
     }
 
@@ -175,10 +201,50 @@ object ReminderScheduler {
             alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
         }
     }
+
+    fun markMusicLaunch(context: Context, date: java.time.LocalDate) {
+        context.getSharedPreferences("music_runtime", Context.MODE_PRIVATE)
+            .edit().putString("last_launch", date.toString()).apply()
+    }
+
+    fun wasMusicLaunched(context: Context, date: java.time.LocalDate): Boolean =
+        context.getSharedPreferences("music_runtime", Context.MODE_PRIVATE)
+            .getString("last_launch", null) == date.toString()
+
+    fun scheduleRelevantChanged(before: SystemSettings, after: SystemSettings): Boolean =
+        before.digitalCutoff != after.digitalCutoff ||
+            before.bedTime != after.bedTime ||
+            before.morningTime != after.morningTime ||
+            before.dietTime != after.dietTime ||
+            before.notificationsEnabled != after.notificationsEnabled ||
+            before.warningEnabled != after.warningEnabled ||
+            before.cutoffEnabled != after.cutoffEnabled ||
+            before.preparationEnabled != after.preparationEnabled ||
+            before.bedEnabled != after.bedEnabled ||
+            before.morningEnabled != after.morningEnabled ||
+            before.morningMusicEnabled != after.morningMusicEnabled ||
+            before.dietEnabled != after.dietEnabled
+
+    fun dismissAnswered(context: Context, record: DailyRecord) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (record.morning != null) manager.cancel(ReminderType.MORNING.requestCode)
+        if (record.diet != null) manager.cancel(ReminderType.DIET.requestCode)
+        if (record.sleep != null) {
+            listOf(ReminderType.WARNING, ReminderType.CUTOFF, ReminderType.PREPARATION, ReminderType.BED)
+                .forEach { manager.cancel(it.requestCode) }
+        }
+    }
 }
 
 class RescheduleReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
+        val supportedActions = setOf(
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED,
+            AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED,
+        )
+        if (intent?.action !in supportedActions) return
         ReminderScheduler.scheduleAll(context, SystemRepository(context).settings)
     }
 }

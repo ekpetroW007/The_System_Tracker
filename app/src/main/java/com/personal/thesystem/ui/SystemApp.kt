@@ -3,6 +3,7 @@
 package com.personal.thesystem.ui
 
 import android.Manifest
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -68,12 +69,15 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,6 +99,7 @@ import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -110,7 +115,9 @@ import com.personal.thesystem.R
 import com.personal.thesystem.data.HSE_ROUTE_TIME
 import com.personal.thesystem.data.HseCalendarEvent
 import com.personal.thesystem.data.HseCalendarReader
+import com.personal.thesystem.data.HseCalendarSource
 import com.personal.thesystem.data.SystemRepository
+import com.personal.thesystem.data.MapKitRuntime
 import com.personal.thesystem.data.TransitOption
 import com.personal.thesystem.data.TransitRoutesState
 import com.personal.thesystem.data.YandexTransitController
@@ -123,6 +130,7 @@ import com.personal.thesystem.model.AssignmentPriority
 import com.personal.thesystem.model.ExperimentFeedback
 import com.personal.thesystem.model.LightPlanState
 import com.personal.thesystem.model.MoneyCategory
+import com.personal.thesystem.model.MoneyCommitment
 import com.personal.thesystem.model.MoneyPeriod
 import com.personal.thesystem.model.MoneyReport
 import com.personal.thesystem.model.MoneySnapshot
@@ -131,11 +139,15 @@ import com.personal.thesystem.model.MoneyTransaction
 import com.personal.thesystem.model.SystemLogic
 import com.personal.thesystem.model.SystemSettings
 import com.personal.thesystem.model.StudyAssignment
+import com.personal.thesystem.model.SleepViolationPart
 import com.personal.thesystem.model.ViolationReason
 import com.personal.thesystem.model.WeeklyExperiment
 import com.personal.thesystem.model.WeeklyReport
 import com.personal.thesystem.notifications.ReminderScheduler
+import com.personal.thesystem.notifications.MorningMusicActivity
+import com.personal.thesystem.notifications.ReminderReceiver
 import com.personal.thesystem.ui.theme.Acid
+import com.personal.thesystem.ui.theme.AcidDim
 import com.personal.thesystem.ui.theme.Amber
 import com.personal.thesystem.ui.theme.Danger
 import com.personal.thesystem.ui.theme.Hairline
@@ -156,7 +168,9 @@ import java.time.temporal.ChronoUnit
 import java.text.NumberFormat
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -164,8 +178,8 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 
-private val Ru = Locale("ru")
-private val DayFormatter = DateTimeFormatter.ofPattern("d MMMM", Ru)
+internal val Ru = Locale.forLanguageTag("ru")
+internal val DayFormatter = DateTimeFormatter.ofPattern("d MMMM", Ru)
 
 private enum class AppTab(val label: String) {
     TODAY("Сегодня"),
@@ -222,12 +236,16 @@ private data class SuccessEmojiParticle(
 )
 
 @Composable
-fun SystemApp(repository: SystemRepository) {
+fun SystemApp(
+    repository: SystemRepository,
+    initialDestination: String? = null,
+    onDestinationHandled: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var selectedTab by remember { mutableStateOf(AppTab.TODAY) }
-    var showPersonalSystem by remember { mutableStateOf(false) }
-    var showDisciplineHistory by remember { mutableStateOf(false) }
+    var selectedTab by rememberSaveable { mutableStateOf(AppTab.TODAY) }
+    var showPersonalSystem by rememberSaveable { mutableStateOf(false) }
+    var showDisciplineHistory by rememberSaveable { mutableStateOf(false) }
     var pendingReason by remember { mutableStateOf<Pair<LocalDate, DecisionKind>?>(null) }
     var emojiAfterReason by remember { mutableStateOf(false) }
     var confettiBurst by remember { mutableIntStateOf(0) }
@@ -240,19 +258,48 @@ fun SystemApp(repository: SystemRepository) {
         )
     }
     var currentTime by remember { mutableStateOf(LocalTime.now()) }
-    val launchDate = remember { LocalDate.now() }
-    val previousDate = remember(launchDate) { launchDate.minusDays(1) }
+    var currentDate by remember { mutableStateOf(LocalDate.now()) }
+    val previousDate = remember(currentDate) { currentDate.minusDays(1) }
     var showPreviousDayReminder by remember {
-        mutableStateOf(repository.shouldShowPreviousDayReminder(launchDate))
+        mutableStateOf(repository.shouldShowPreviousDayReminder(currentDate))
     }
     val modeTransitionProgress = remember { Animatable(1f) }
     var modeTransitionTarget by remember { mutableStateOf<Boolean?>(null) }
+    var openWeeklyReport by remember { mutableStateOf(false) }
+
+    LaunchedEffect(initialDestination) {
+        when (initialDestination) {
+            "history" -> selectedTab = AppTab.HISTORY
+            "money" -> selectedTab = AppTab.MONEY
+            "stats" -> selectedTab = AppTab.STATS
+            "week" -> {
+                selectedTab = AppTab.STATS
+                openWeeklyReport = true
+            }
+            "settings" -> selectedTab = AppTab.SETTINGS
+            "hse" -> {
+                if (!repository.settings.hseModeEnabled) repository.updateSettings { it.copy(hseModeEnabled = true) }
+                selectedTab = AppTab.TODAY
+                showPersonalSystem = false
+            }
+            "today", "water", "diet", "morning", "sleep" -> {
+                selectedTab = AppTab.TODAY
+                showPersonalSystem = repository.settings.hseModeEnabled
+            }
+        }
+        if (initialDestination != null) onDestinationHandled()
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
-            delay(60_000)
+            delay(30_000)
             currentTime = LocalTime.now()
+            currentDate = LocalDate.now()
         }
+    }
+    LaunchedEffect(currentDate) {
+        repository.reload()
+        showPreviousDayReminder = repository.shouldShowPreviousDayReminder(currentDate)
     }
     val hseMode = repository.settings.hseModeEnabled
     val targetBackground = when {
@@ -262,10 +309,14 @@ fun SystemApp(repository: SystemRepository) {
         else -> Ink
     }
     val appBackground by animateColorAsState(targetBackground, tween(900), label = "dayBackground")
+    val motionAllowed = !repository.settings.reduceMotion && ValueAnimator.areAnimatorsEnabled()
 
     fun applySettings(transform: (SystemSettings) -> SystemSettings) {
+        val before = repository.settings
         repository.updateSettings(transform)
-        ReminderScheduler.scheduleAll(context, repository.settings)
+        if (ReminderScheduler.scheduleRelevantChanged(before, repository.settings)) {
+            ReminderScheduler.scheduleAll(context, repository.settings)
+        }
     }
 
     fun toggleHseModeAnimated() {
@@ -277,7 +328,7 @@ fun SystemApp(repository: SystemRepository) {
             applySettings { it.copy(hseModeEnabled = target) }
             modeTransitionProgress.animateTo(
                 1f,
-                tween(durationMillis = 900, easing = FastOutSlowInEasing),
+                tween(durationMillis = if (motionAllowed) 900 else 120, easing = FastOutSlowInEasing),
             )
             modeTransitionTarget = null
         }
@@ -430,8 +481,11 @@ fun SystemApp(repository: SystemRepository) {
                         repository = repository,
                         hseMode = hseMode,
                         onOpenHistory = { showDisciplineHistory = true },
+                        openWeeklyReport = openWeeklyReport,
+                        onWeeklyReportOpened = { openWeeklyReport = false },
                     )
                     AppTab.SETTINGS -> SettingsScreen(
+                        repository = repository,
                         settings = repository.settings,
                         records = repository.records.values,
                         onUpdate = ::applySettings,
@@ -442,7 +496,7 @@ fun SystemApp(repository: SystemRepository) {
                 }
             }
         }
-        if (celebrationKind == DecisionKind.SLEEP) {
+        if (!motionAllowed) Unit else if (celebrationKind == DecisionKind.SLEEP) {
             ConfettiBurst(confettiBurst, Modifier.fillMaxSize().zIndex(20f))
         } else {
             SuccessEmojiBurst(confettiBurst, celebrationKind, Modifier.fillMaxSize().zIndex(21f))
@@ -454,7 +508,15 @@ fun SystemApp(repository: SystemRepository) {
                 date = previousDate,
                 onYes = { task ->
                     val kind = when (task) {
-                        DailyTask.MORNING -> { repository.setMorning(previousDate, DecisionStatus.YES); DecisionKind.MORNING }
+                        DailyTask.MORNING -> {
+                            val target = SystemLogic.admissionFor(
+                                previousDate,
+                                repository.settings.admissionStart,
+                                repository.records.values,
+                            ).target
+                            repository.setMorningRepetitions(previousDate, target, target)
+                            DecisionKind.MORNING
+                        }
                         DailyTask.LIGHT -> { repository.setLight(previousDate, DecisionStatus.YES); DecisionKind.LIGHT }
                         DailyTask.DIET -> { repository.setDiet(previousDate, DecisionStatus.YES); DecisionKind.DIET }
                         DailyTask.WATER -> { repository.setWater(previousDate, DecisionStatus.YES); DecisionKind.WATER }
@@ -473,7 +535,7 @@ fun SystemApp(repository: SystemRepository) {
                     }
                 },
                 onDone = {
-                    repository.markPreviousDayReminderShown(launchDate)
+                    repository.markPreviousDayReminderShown(currentDate)
                     showPreviousDayReminder = false
                 },
                 modifier = Modifier.fillMaxSize().zIndex(19f),
@@ -495,9 +557,14 @@ fun SystemApp(repository: SystemRepository) {
                 emojiAfterReason = false
                 pendingReason = null
             },
-            onReason = { reason ->
+            onReason = { reason, sleepPart ->
                 when (kind) {
-                    DecisionKind.SLEEP -> repository.setSleep(date, DecisionStatus.NO, ViolationReason.fromId(reason))
+                    DecisionKind.SLEEP -> repository.setSleep(
+                        date,
+                        DecisionStatus.NO,
+                        ViolationReason.fromId(reason),
+                        sleepPart,
+                    )
                     DecisionKind.DIET -> repository.setDiet(date, DecisionStatus.NO, DietViolationReason.fromId(reason))
                     DecisionKind.LIGHT -> repository.setLight(date, DecisionStatus.NO)
                     DecisionKind.WATER -> repository.setWater(date, DecisionStatus.NO)
@@ -838,6 +905,11 @@ private fun SystemBottomBar(selected: AppTab, onSelect: (AppTab) -> Unit, backgr
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(18.dp))
+                    .semantics {
+                        role = Role.Tab
+                        this.selected = active
+                        contentDescription = tab.label(hseMode)
+                    }
                     .clickable {
                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         onSelect(tab)
@@ -851,7 +923,7 @@ private fun SystemBottomBar(selected: AppTab, onSelect: (AppTab) -> Unit, backgr
                     tab.label(hseMode),
                     color = tint,
                     style = MaterialTheme.typography.labelMedium,
-                    fontSize = 9.sp,
+                    fontSize = 11.sp,
                     letterSpacing = 0.2.sp,
                 )
             }
@@ -861,7 +933,7 @@ private fun SystemBottomBar(selected: AppTab, onSelect: (AppTab) -> Unit, backgr
 
 @Composable
 private fun NavGlyph(tab: AppTab, color: Color) {
-    Canvas(Modifier.size(22.dp).semantics { contentDescription = tab.label }) {
+    Canvas(Modifier.size(22.dp)) {
         val stroke = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
         when (tab) {
             AppTab.TODAY -> {
@@ -903,7 +975,7 @@ private fun NavGlyph(tab: AppTab, color: Color) {
 }
 
 @Composable
-private fun ScreenHeader(eyebrow: String, title: String, detail: String? = null) {
+internal fun ScreenHeader(eyebrow: String, title: String, detail: String? = null) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(7.dp).background(Acid, CircleShape))
@@ -941,14 +1013,15 @@ private fun TodayScreen(
     var expandedCompleted by remember(today) { mutableStateOf(emptySet<DailyTask>()) }
     val admission = SystemLogic.admissionFor(today, settings.admissionStart, repository.records.values)
     val lightPlan = SystemLogic.lightPlanFor(today, settings.lightStart)
+    val activeTasks = SystemLogic.activeTasks(today, settings)
     val experiment = if (SystemLogic.experimentAvailableOn(today)) {
         SystemLogic.weeklyExperiment(today, repository.records.values, repository.experimentFeedback)
     } else {
         null
     }
-    val answered = listOf(record.morning, record.light, record.diet, record.water, record.sleep).count { it != null }
-    val currentTask = SystemLogic.currentTask(record, currentTime, settings.digitalCutoff)
-    val recoveryTask = SystemLogic.recoveryTask(record, currentTime, settings.digitalCutoff)
+    val answered = activeTasks.count { SystemLogic.statusFor(record, it) != null }
+    val currentTask = SystemLogic.currentTask(record, currentTime, settings.digitalCutoff, activeTasks)
+    val recoveryTask = SystemLogic.recoveryTask(record, currentTime, settings.digitalCutoff, activeTasks)
 
     fun toggleCompleted(task: DailyTask) {
         expandedCompleted = if (task in expandedCompleted) expandedCompleted - task else expandedCompleted + task
@@ -970,25 +1043,22 @@ private fun TodayScreen(
                         ScreenHeader("Личная система", "Сегодня")
                     }
                 }
-                SystemMark(answered / 5f, onToggleHseMode)
+                Column(horizontalAlignment = Alignment.End) {
+                    SystemMark(answered, activeTasks.size)
+                    Spacer(Modifier.height(8.dp))
+                    ModeToggleButton(settings.hseModeEnabled, onToggleHseMode)
+                }
             }
         }
 
-        item { DailyStatement(answered, record) }
+        item { DailyStatement(answered, activeTasks.size, record) }
+
+        currentTask?.let { task ->
+            item { CurrentTaskCard(task) }
+        }
 
         recoveryTask?.let { task ->
             item { RecoveryCard(task) }
-        }
-
-        experiment?.let { weeklyExperiment ->
-            item {
-                WeeklyExperimentCard(
-                    experiment = weeklyExperiment,
-                    feedback = repository.experimentFeedback[weeklyExperiment.weekStart],
-                    canReview = today.dayOfWeek == DayOfWeek.SATURDAY || today.dayOfWeek == DayOfWeek.SUNDAY,
-                    onFeedback = { repository.setExperimentFeedback(weeklyExperiment.weekStart, it) },
-                )
-            }
         }
 
         if (!settings.notificationsEnabled || !exactAlarmsAllowed) {
@@ -1018,29 +1088,47 @@ private fun TodayScreen(
                 },
                 status = record.morning,
                 reasonLabel = record.morningReason?.label,
-                onYes = {
-                    if (SystemLogic.toggledDecision(record.morning, DecisionStatus.YES) == null) {
-                        repository.clearMorning(today)
-                    } else {
-                        expandedCompleted -= DailyTask.MORNING
-                        repository.setMorning(today, DecisionStatus.YES)
-                        onCelebrate(DecisionKind.MORNING)
-                    }
-                },
+                onYes = {},
                 onNo = {
                     if (SystemLogic.toggledDecision(record.morning, DecisionStatus.NO) == null) repository.clearMorning(today)
                     else onNo(DecisionKind.MORNING)
                 },
-                collapsed = record.morning == DecisionStatus.YES && DailyTask.MORNING !in expandedCompleted,
+                collapsed = record.morning != null && DailyTask.MORNING !in expandedCompleted,
                 current = currentTask == DailyTask.MORNING,
                 onToggleCollapsed = { toggleCompleted(DailyTask.MORNING) },
+                showDecisionButtons = false,
                 footer = {
+                    PushupCounter(
+                        repetitions = record.morningRepetitions ?: if (record.morning == DecisionStatus.YES) admission.target else 0,
+                        target = admission.target,
+                        onChange = { repetitions ->
+                            if (repository.setMorningRepetitions(today, repetitions, admission.target)) {
+                                expandedCompleted -= DailyTask.MORNING
+                                onCelebrate(DecisionKind.MORNING)
+                            }
+                        },
+                        onNo = {
+                            if (record.morning == DecisionStatus.NO) repository.clearMorning(today)
+                            else onNo(DecisionKind.MORNING)
+                        },
+                    )
+                    Spacer(Modifier.height(18.dp))
                     AdmissionProgress(admission.target, admission.level, admission.totalLevels, admission.completed)
                 },
             )
         }
 
-        item {
+        if (lightPlan.completed && today == settings.lightStart.plusDays(SystemLogic.LIGHT_PLAN_DAYS.toLong())) item {
+            PremiumCard(color = Acid.copy(alpha = .07f), border = Acid.copy(alpha = .55f)) {
+                Text("ПЛАН СВЕТА ПРОЙДЕН", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+                Spacer(Modifier.height(8.dp))
+                Text("30 дней завершены", color = Paper, style = MaterialTheme.typography.headlineMedium)
+                Spacer(Modifier.height(5.dp))
+                Text("Свет больше не входит в ежедневные задачи и статистику новых дней.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        if (!lightPlan.completed) item {
             SectionLabel("СВЕТ", if (lightPlan.completed) "РЕЖИМ ЗАКРЕПЛЁН" else "ДЕНЬ ${lightPlan.day}/${lightPlan.totalDays}")
             Spacer(Modifier.height(8.dp))
             DecisionCard(
@@ -1062,7 +1150,7 @@ private fun TodayScreen(
                     if (SystemLogic.toggledDecision(record.light, DecisionStatus.NO) == null) repository.clearLight(today)
                     else onNo(DecisionKind.LIGHT)
                 },
-                collapsed = record.light == DecisionStatus.YES && DailyTask.LIGHT !in expandedCompleted,
+                collapsed = record.light != null && DailyTask.LIGHT !in expandedCompleted,
                 current = currentTask == DailyTask.LIGHT,
                 onToggleCollapsed = { toggleCompleted(DailyTask.LIGHT) },
                 footer = { LightPlanProgress(lightPlan) },
@@ -1091,7 +1179,7 @@ private fun TodayScreen(
                     if (SystemLogic.toggledDecision(record.diet, DecisionStatus.NO) == null) repository.clearDiet(today)
                     else onNo(DecisionKind.DIET)
                 },
-                collapsed = record.diet == DecisionStatus.YES && DailyTask.DIET !in expandedCompleted,
+                collapsed = record.diet != null && DailyTask.DIET !in expandedCompleted,
                 current = currentTask == DailyTask.DIET,
                 onToggleCollapsed = { toggleCompleted(DailyTask.DIET) },
             )
@@ -1123,7 +1211,9 @@ private fun TodayScreen(
                 number = "05",
                 description = "Цифровой отбой в ${SystemLogic.formatTime(settings.digitalCutoff)}. В кровати в ${SystemLogic.formatTime(settings.bedTime)}.",
                 status = record.sleep,
-                reasonLabel = record.sleepReason?.label,
+                reasonLabel = listOfNotNull(record.sleepViolationPart?.label, record.sleepReason?.label)
+                    .takeIf { it.isNotEmpty() }
+                    ?.joinToString(" · "),
                 onYes = {
                     if (SystemLogic.toggledDecision(record.sleep, DecisionStatus.YES) == null) {
                         repository.clearSleep(today)
@@ -1137,27 +1227,37 @@ private fun TodayScreen(
                     if (SystemLogic.toggledDecision(record.sleep, DecisionStatus.NO) == null) repository.clearSleep(today)
                     else onNo(DecisionKind.SLEEP)
                 },
-                collapsed = record.sleep == DecisionStatus.YES && DailyTask.SLEEP !in expandedCompleted,
+                collapsed = record.sleep != null && DailyTask.SLEEP !in expandedCompleted,
                 current = currentTask == DailyTask.SLEEP,
                 onToggleCollapsed = { toggleCompleted(DailyTask.SLEEP) },
             )
         }
 
-        item { TonightProtocol(settings) }
+        experiment?.let { weeklyExperiment ->
+            item {
+                WeeklyExperimentCard(
+                    experiment = weeklyExperiment,
+                    feedback = repository.experimentFeedback[weeklyExperiment.weekStart],
+                    canReview = today.dayOfWeek == DayOfWeek.SATURDAY || today.dayOfWeek == DayOfWeek.SUNDAY,
+                    onFeedback = { repository.setExperimentFeedback(weeklyExperiment.weekStart, it) },
+                )
+            }
+        }
+
+        if (currentTime.hour >= 20) item { TonightProtocol(settings) }
     }
 }
 
 @Composable
-private fun SystemMark(progress: Float, onToggleHseMode: () -> Unit) {
+private fun SystemMark(answered: Int, total: Int) {
+    val progress = if (total == 0) 1f else answered / total.toFloat()
     val animated by animateFloatAsState(progress, spring(stiffness = Spring.StiffnessLow), label = "systemMark")
     Box(
         Modifier
             .size(54.dp)
             .clip(CircleShape)
-            .clickable(onClick = onToggleHseMode)
             .semantics {
-                role = Role.Button
-                contentDescription = "Включить или выключить режим ВШЭ"
+                contentDescription = "Отмечено $answered из $total задач"
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -1171,7 +1271,24 @@ private fun SystemMark(progress: Float, onToggleHseMode: () -> Unit) {
                 style = Stroke(3.dp.toPx(), cap = StrokeCap.Round),
             )
         }
-        Text("S", color = if (progress > 0f) Acid else Muted, fontWeight = FontWeight.Black, fontSize = 19.sp)
+        Text("$answered/$total", color = if (progress > 0f) Acid else Muted, fontWeight = FontWeight.Black, fontSize = 14.sp)
+    }
+}
+
+@Composable
+private fun ModeToggleButton(enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .height(48.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (enabled) Acid.copy(alpha = .14f) else SurfaceSoft)
+            .border(1.dp, if (enabled) Acid.copy(alpha = .55f) else Hairline, RoundedCornerShape(16.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = if (enabled) "Выключить режим ВШЭ" else "Включить режим ВШЭ" }
+            .padding(horizontal = 13.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(if (enabled) "ВШЭ · ВКЛ" else "ВШЭ", color = if (enabled) Acid else Paper, style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -1241,22 +1358,40 @@ private fun ModeTransitionOverlay(
 }
 
 @Composable
-private fun DailyStatement(answered: Int, record: DailyRecord) {
+private fun DailyStatement(answered: Int, total: Int, record: DailyRecord) {
     val failures = listOf(record.morning, record.light, record.diet, record.water, record.sleep).count { it == DecisionStatus.NO }
     val label = when {
-        answered == 0 -> "ПЯТЬ ЗАДАЧ -\nОДИН ДЕНЬ"
+        answered == 0 -> "${if (total == 5) "ПЯТЬ ЗАДАЧ" else "ЧЕТЫРЕ ЗАДАЧИ"} -\nОДИН ДЕНЬ"
+        answered == total && failures == 0 -> "ДЕНЬ\nЗАКРЫТ."
+        answered == total -> "НАРУШЕНИЯ\nУСТАНОВЛЕНЫ"
+        answered == total - 1 -> "ПОЧТИ\nГОТОВО"
         answered == 1 -> "ПЕРВАЯ ЧАСТЬ\nГОТОВА"
         answered == 2 -> "ДВЕ ЧАСТИ\nГОТОВЫ"
-        answered == 3 -> "ПОЛДЕЛА\nСДЕЛАНО"
-        answered == 4 -> "ПОЧТИ\nГОТОВО"
-        failures == 0 -> "ДЕНЬ\nЗАКРЫТ."
-        else -> "НАРУШЕНИЯ\nУСТАНОВЛЕНЫ"
+        else -> "ПОЛДЕЛА\nСДЕЛАНО"
     }
-    val supporting = SystemLogic.contextualPhrase(record)
+    val supporting = if (total == 5) SystemLogic.contextualPhrase(record) else when {
+        answered == total && failures == 0 -> "Все четыре текущие задачи выполнены. Дело сделано. Супер!"
+        answered == total -> "Все текущие задачи отмечены. Картина дня готова."
+        else -> "Отмечено $answered из $total. Главное — честность."
+    }
     Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         Text(label, color = Paper, style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(12.dp))
         Text(supporting, color = Muted, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.fillMaxWidth(0.9f))
+    }
+}
+
+@Composable
+private fun CurrentTaskCard(task: DailyTask) {
+    PremiumCard(
+        color = Acid.copy(alpha = .065f),
+        border = Acid.copy(alpha = .72f),
+    ) {
+        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
+        Spacer(Modifier.height(8.dp))
+        Text(task.title, color = Paper, style = MaterialTheme.typography.headlineLarge)
+        Spacer(Modifier.height(5.dp))
+        Text(task.recoveryAction, color = Muted, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -1268,299 +1403,6 @@ private fun RecoveryCard(task: DailyTask) {
         Text("День не потерян.", color = Paper, style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(5.dp))
         Text("Следующее действие — ${task.recoveryAction.replaceFirstChar { it.lowercase() }}", color = Muted, style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-@Composable
-private fun HseDashboardScreen(
-    repository: SystemRepository,
-    currentTime: LocalTime,
-    calendarAccessAllowed: Boolean,
-    onRequestCalendarAccess: () -> Unit,
-    onToggleHseMode: () -> Unit,
-    onOpenSystem: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    val context = LocalContext.current
-    val settings = repository.settings
-    val today = LocalDate.now()
-    val calendarEvents = remember(calendarAccessAllowed, today, currentTime.hour, currentTime.minute) {
-        if (calendarAccessAllowed) HseCalendarReader.eventsFor(context, today) else emptyList()
-    }
-    val nextLesson = calendarEvents.firstOrNull { !it.end.isBefore(currentTime) }
-    val record = repository.recordFor(today)
-    val statuses = listOf(record.morning, record.light, record.diet, record.water, record.sleep)
-    val completed = statuses.count { it == DecisionStatus.YES }
-    val evening = !currentTime.isBefore(settings.digitalCutoff)
-    val transitController = remember { YandexTransitController() }
-    val transitState = transitController.state
-    val savedTransitPlan = repository.hseTransitPlan
-    val transitDate = plannedMorningDate(today, currentTime, savedTransitPlan?.targetDate)
-
-    LaunchedEffect(
-        settings.hseHomeAddress,
-        settings.hseUniversityAddress,
-        transitDate,
-    ) {
-        if (settings.hseHomeAddress.isNotBlank()) {
-            val saved = repository.hseTransitPlan
-            if (
-                saved?.targetDate == transitDate &&
-                saved.homeAddress == settings.hseHomeAddress &&
-                saved.universityAddress == settings.hseUniversityAddress
-            ) {
-                transitController.showSaved(saved)
-            } else {
-                transitController.refresh(
-                    settings.hseHomeAddress,
-                    settings.hseUniversityAddress,
-                    transitDate,
-                    repository::saveHseTransitPlan,
-                )
-            }
-        }
-    }
-
-    LazyColumn(
-        Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 30.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                ScreenHeader("Режим ВШЭ", today.format(DayFormatter).replaceFirstChar { it.uppercase() }, "Учёба, дорога и личная система.")
-                Box(
-                    Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF142A3B))
-                        .clickable(onClick = onToggleHseMode)
-                        .semantics {
-                            role = Role.Button
-                            contentDescription = "Выключить режим ВШЭ"
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("В", color = Acid, style = MaterialTheme.typography.titleLarge)
-                }
-            }
-        }
-        if (evening) {
-            item {
-                PremiumCard(color = Color(0xFF10151B), border = Acid.copy(alpha = .22f)) {
-                    Text("УЧЕБНЫЙ ДЕНЬ ЗАВЕРШЁН", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                    Spacer(Modifier.height(9.dp))
-                    Text("Сейчас приоритет — сон.", color = Paper, style = MaterialTheme.typography.headlineMedium)
-                    Spacer(Modifier.height(5.dp))
-                    Text("Расписание и дорога приглушены до утра. Личная система остаётся доступна.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-        item {
-            PremiumCard(
-                color = Color(0xFF10202D).copy(alpha = if (evening) .55f else 1f),
-                border = Acid.copy(alpha = if (evening) .12f else .32f),
-            ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("СЛЕДУЮЩАЯ ПАРА", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                    Text(nextLesson?.start?.let(SystemLogic::formatTime) ?: "—", color = Paper, style = MaterialTheme.typography.labelLarge)
-                }
-                Spacer(Modifier.height(15.dp))
-                when {
-                    !calendarAccessAllowed -> {
-                        Text("Подключи календарь ВШЭ", color = Paper, style = MaterialTheme.typography.headlineMedium)
-                        Spacer(Modifier.height(6.dp))
-                        Text("The System прочитает только события календаря Android. Пароль ВШЭ приложению не нужен.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                        Spacer(Modifier.height(12.dp))
-                        HseActionButton("ПОДКЛЮЧИТЬ КАЛЕНДАРЬ", onClick = onRequestCalendarAccess)
-                    }
-                    nextLesson == null -> {
-                        Text(
-                            if (calendarEvents.isEmpty()) "На сегодня занятий нет" else "На сегодня занятий больше нет",
-                            color = Paper,
-                            style = MaterialTheme.typography.headlineMedium,
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        if (calendarEvents.isEmpty()) {
-                            Text("Если расписание уже опубликовано, экспортируй его в календарь из HSE App X.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                    else -> {
-                        Text(nextLesson.title, color = Paper, style = MaterialTheme.typography.headlineMedium)
-                        if (nextLesson.location.isNotBlank()) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(nextLesson.location, color = Muted, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            PremiumCard(color = Color(0xFF0E1B25).copy(alpha = if (evening) .55f else 1f)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                    Text("АВТОБУС В ВШЭ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                    Text(
-                        "${if (transitDate == today) "СЕГОДНЯ" else "ЗАВТРА"} · ${SystemLogic.formatTime(HSE_ROUTE_TIME)}",
-                        color = Paper,
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
-                Spacer(Modifier.height(15.dp))
-                if (settings.hseHomeAddress.isBlank()) {
-                    Text("Укажи домашний адрес — он сохранится только на этом устройстве.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
-                    HseActionButton("УКАЗАТЬ АДРЕС", onClick = onOpenSettings)
-                } else {
-                    when (val routeState = transitState) {
-                        TransitRoutesState.Idle,
-                        TransitRoutesState.Loading -> {
-                            Text("Собираю понятный маршрут на 08:30…", color = Paper, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        is TransitRoutesState.Ready -> {
-                            TransitOptionRow(routeState.plan.route)
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                "Яндекс Карты · план сохранён на ${routeState.plan.targetDate.format(DayFormatter)}",
-                                color = Muted,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontSize = 12.sp,
-                            )
-                        }
-                        is TransitRoutesState.Failed -> {
-                            Text(routeState.message, color = Danger, style = MaterialTheme.typography.bodyMedium)
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                "ОБНОВИТЬ",
-                                color = Acid,
-                                style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.clickable {
-                                    transitController.refresh(
-                                        settings.hseHomeAddress,
-                                        settings.hseUniversityAddress,
-                                        transitDate,
-                                        repository::saveHseTransitPlan,
-                                    )
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            PremiumCard(color = Color(0xFF0D1822).copy(alpha = if (evening) .55f else 1f)) {
-                Text("РАСПИСАНИЕ ДНЯ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                Spacer(Modifier.height(13.dp))
-                when {
-                    !calendarAccessAllowed -> Text("Дай доступ к календарю в карточке выше.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    calendarEvents.isEmpty() -> Text("В календаре нет занятий на этот день.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    else -> calendarEvents.forEachIndexed { index, event ->
-                        HseLessonRow(event)
-                        if (index != calendarEvents.lastIndex) Spacer(Modifier.height(14.dp))
-                    }
-                }
-            }
-        }
-        item {
-            PremiumCard(
-                modifier = Modifier.clickable(onClick = onOpenSystem),
-                color = SurfaceRaised,
-                border = if (completed < 5) Acid.copy(alpha = .34f) else Hairline,
-            ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("ЛИЧНАЯ СИСТЕМА", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Text("$completed из 5 выполнено", color = Paper, style = MaterialTheme.typography.titleLarge)
-                    }
-                    Text("→", color = Acid, style = MaterialTheme.typography.headlineMedium)
-                }
-                Spacer(Modifier.height(14.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    statuses.forEach { status ->
-                        Box(
-                            Modifier.weight(1f).height(5.dp).background(
-                                when (status) {
-                                    DecisionStatus.YES -> Acid
-                                    DecisionStatus.NO -> Danger
-                                    null -> Hairline
-                                }, CircleShape
-                            )
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HseLessonRow(event: HseCalendarEvent) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.width(70.dp)) {
-            Text(SystemLogic.formatTime(event.start), color = Paper, style = MaterialTheme.typography.titleLarge)
-            Text(SystemLogic.formatTime(event.end), color = Muted, style = MaterialTheme.typography.bodyMedium)
-        }
-        Box(Modifier.size(7.dp).background(Acid, CircleShape))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(event.title, color = Paper, style = MaterialTheme.typography.titleMedium)
-            if (event.location.isNotBlank()) {
-                Text(event.location, color = Muted, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransitOptionRow(option: TransitOption) {
-    Column(Modifier.fillMaxWidth()) {
-        val busTitle = if (option.lines.startsWith("автобус", ignoreCase = true)) {
-            option.lines
-        } else {
-            "Автобус ${option.lines}"
-        }
-        Text(busTitle, color = Paper, style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(13.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column {
-                Text("БУДЕТ НА ОСТАНОВКЕ", color = Muted, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(3.dp))
-                Text(option.busArrivalTime, color = Acid, style = MaterialTheme.typography.titleLarge)
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("ВСЯ ДОРОГА", color = Muted, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(3.dp))
-                Text("${option.totalMinutes} мин", color = Paper, style = MaterialTheme.typography.titleLarge)
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = Hairline)
-        Spacer(Modifier.height(14.dp))
-        TransitStopRow("СЕСТЬ", option.boardingStop)
-        Spacer(Modifier.height(11.dp))
-        Text("↓", color = Acid, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 4.dp))
-        Spacer(Modifier.height(11.dp))
-        TransitStopRow("ВЫЙТИ", option.exitStop)
-    }
-}
-
-@Composable
-private fun TransitStopRow(label: String, stop: String) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        Text(label, color = Acid, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(64.dp))
-        Text(stop, color = Paper, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun HseActionButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Box(
-        Modifier.fillMaxWidth().height(48.dp).clip(RoundedCornerShape(15.dp))
-            .background(if (enabled) Acid else Hairline).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = if (enabled) Ink else Muted, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -1607,7 +1449,7 @@ private fun WeeklyExperimentCard(
                             .clickable(role = Role.Button) { onFeedback(option) },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(label, color = Paper, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp, textAlign = TextAlign.Center)
+                        Text(label, color = Paper, style = MaterialTheme.typography.labelMedium, fontSize = 11.sp, textAlign = TextAlign.Center)
                     }
                 }
             }
@@ -1640,10 +1482,10 @@ private fun ReminderPermissionCard(title: String, detail: String, onEnable: () -
 }
 
 @Composable
-private fun SectionLabel(left: String, right: String) {
+internal fun SectionLabel(left: String, right: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(left, color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.8.sp)
-        Text(right, color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 0.6.sp)
+        Text(right, color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 0.6.sp)
     }
 }
 
@@ -1659,11 +1501,12 @@ private fun DecisionCard(
     collapsed: Boolean = false,
     current: Boolean = false,
     onToggleCollapsed: () -> Unit = {},
+    showDecisionButtons: Boolean = true,
     footer: (@Composable () -> Unit)? = null,
 ) {
     val background by animateColorAsState(
         when (status) {
-            DecisionStatus.YES -> Acid.copy(alpha = 0.10f)
+            DecisionStatus.YES -> AcidDim.copy(alpha = 0.10f)
             DecisionStatus.NO -> Danger.copy(alpha = 0.08f)
             null -> SurfaceRaised
         },
@@ -1671,16 +1514,17 @@ private fun DecisionCard(
     )
     AnimatedContent(targetState = collapsed, label = "collapse$number") { isCollapsed ->
         if (isCollapsed) {
+            val statusColor = if (status == DecisionStatus.NO) Danger else AcidDim
             PremiumCard(
-                color = Acid.copy(alpha = .08f),
-                border = Acid.copy(alpha = .34f),
+                color = statusColor.copy(alpha = .08f),
+                border = statusColor.copy(alpha = .34f),
                 modifier = Modifier.clickable(onClick = onToggleCollapsed),
             ) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(number, color = Acid, style = MaterialTheme.typography.labelMedium)
+                    Text(number, color = statusColor, style = MaterialTheme.typography.labelMedium)
                     Spacer(Modifier.width(14.dp))
                     Text(title, color = Paper, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    Text("✓", color = Acid, fontWeight = FontWeight.Black, fontSize = 19.sp)
+                    Text(if (status == DecisionStatus.NO) "×" else "✓", color = statusColor, fontWeight = FontWeight.Black, fontSize = 19.sp)
                 }
             }
             return@AnimatedContent
@@ -1689,7 +1533,7 @@ private fun DecisionCard(
             color = if (current && status == null) Acid.copy(alpha = .06f) else background,
             border = when {
                 current && status == null -> Acid.copy(alpha = .78f)
-                status == DecisionStatus.YES -> Acid.copy(alpha = .38f)
+                status == DecisionStatus.YES -> AcidDim.copy(alpha = .38f)
                 else -> Hairline
             },
             modifier = Modifier.animateContentSize(),
@@ -1711,19 +1555,21 @@ private fun DecisionCard(
             if (status != null) {
                 Box(
                     Modifier
-                        .size(34.dp)
+                        .size(48.dp)
                         .background(if (status == DecisionStatus.YES) Acid else Danger, CircleShape)
-                        .clickable(enabled = status == DecisionStatus.YES, onClick = onToggleCollapsed),
+                        .clickable(onClick = onToggleCollapsed),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(if (status == DecisionStatus.YES) "✓" else "×", color = Ink, fontWeight = FontWeight.Black, fontSize = 19.sp)
                 }
             }
         }
-        Spacer(Modifier.height(18.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            DecisionButton("ДА", status == DecisionStatus.YES, true, Modifier.weight(1f), onYes)
-            DecisionButton("НЕТ", status == DecisionStatus.NO, false, Modifier.weight(1f), onNo)
+        if (showDecisionButtons) {
+            Spacer(Modifier.height(18.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                DecisionButton("ДА", "$title: Да", status == DecisionStatus.YES, true, Modifier.weight(1f), onYes)
+                DecisionButton("НЕТ", "$title: Нет", status == DecisionStatus.NO, false, Modifier.weight(1f), onNo)
+            }
         }
         AnimatedVisibility(reasonLabel != null, enter = fadeIn(), exit = fadeOut()) {
             if (reasonLabel != null) {
@@ -1873,6 +1719,7 @@ private fun WaterAdjustButton(
 @Composable
 private fun DecisionButton(
     text: String,
+    description: String,
     selected: Boolean,
     positive: Boolean,
     modifier: Modifier,
@@ -1890,14 +1737,55 @@ private fun DecisionButton(
             .clip(RoundedCornerShape(15.dp))
             .background(if (selected) selectedColor else SurfaceSoft)
             .border(1.dp, if (selected) selectedColor else Hairline, RoundedCornerShape(15.dp))
-            .semantics { role = Role.Button; contentDescription = text }
+            .semantics { role = Role.Button; contentDescription = description }
             .clickable(interactionSource = interaction, indication = null) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 onClick()
             },
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = if (selected) Ink else Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
+    }
+}
+
+@Composable
+private fun PushupCounter(
+    repetitions: Int,
+    target: Int,
+    onChange: (Int) -> Unit,
+    onNo: () -> Unit,
+) {
+    val completed = repetitions >= target
+    Column {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            WaterAdjustButton("−", "Убавить одно отжимание", repetitions > 0) { onChange(repetitions - 1) }
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "$repetitions",
+                    color = if (completed) Acid else Paper,
+                    style = MaterialTheme.typography.displayMedium,
+                )
+                Text("из $target подряд", color = Muted, style = MaterialTheme.typography.bodyMedium)
+            }
+            WaterAdjustButton("+", "Добавить одно отжимание", repetitions < 100, strong = repetitions == target - 1) {
+                onChange(repetitions + 1)
+            }
+        }
+        if (!completed) {
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(SurfaceSoft)
+                    .border(1.dp, Danger.copy(alpha = .55f), RoundedCornerShape(15.dp))
+                    .clickable(role = Role.Button, onClick = onNo),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("НЕ ВЫПОЛНЕНО", color = Danger, style = MaterialTheme.typography.labelLarge)
+            }
+        }
     }
 }
 
@@ -1971,8 +1859,13 @@ private fun TimelineItem(time: String, text: String, last: Boolean) {
 }
 
 @Composable
-private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (String) -> Unit) {
+private fun ReasonSheet(
+    kind: DecisionKind,
+    onDismiss: () -> Unit,
+    onReason: (String, SleepViolationPart?) -> Unit,
+) {
     val haptics = LocalHapticFeedback.current
+    var sleepPart by remember(kind) { mutableStateOf<SleepViolationPart?>(null) }
     val reasons = when (kind) {
         DecisionKind.SLEEP -> ViolationReason.entries.map { it.id to it.label }
         DecisionKind.DIET -> DietViolationReason.entries.map { it.id to it.label }
@@ -1995,6 +1888,31 @@ private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (St
             Spacer(Modifier.height(8.dp))
             Text("Без оправданий и самооценки — только факт для анализа.", color = Muted, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(22.dp))
+            if (kind == DecisionKind.SLEEP) {
+                Text("ЧТО НАРУШЕНО", color = Muted, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(10.dp))
+                SleepViolationPart.entries.forEach { part ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 9.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (sleepPart == part) Acid.copy(alpha = .12f) else SurfaceSoft)
+                            .border(1.dp, if (sleepPart == part) Acid.copy(alpha = .55f) else Hairline, RoundedCornerShape(16.dp))
+                            .clickable { sleepPart = part }
+                            .padding(horizontal = 16.dp, vertical = 15.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(part.label, color = Paper, style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.weight(1f))
+                        if (sleepPart == part) Text("✓", color = Acid, fontWeight = FontWeight.Black)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("ПОЧЕМУ", color = Muted, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(10.dp))
+            }
+            val canChooseReason = kind != DecisionKind.SLEEP || sleepPart != null
             reasons.forEach { (id, label) ->
                 Row(
                     Modifier
@@ -2003,16 +1921,16 @@ private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (St
                         .clip(RoundedCornerShape(16.dp))
                         .background(SurfaceSoft)
                         .border(1.dp, Hairline, RoundedCornerShape(16.dp))
-                        .clickable {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onReason(id)
+                        .clickable(enabled = canChooseReason) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onReason(id, sleepPart)
                         }
                         .padding(horizontal = 16.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(Modifier.size(8.dp).background(Danger, CircleShape))
                     Spacer(Modifier.width(13.dp))
-                    Text(label, color = Paper, style = MaterialTheme.typography.titleMedium)
+                    Text(label, color = if (canChooseReason) Paper else Muted, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.weight(1f))
                     Text("→", color = Muted, fontSize = 20.sp)
                 }
@@ -2022,7 +1940,7 @@ private fun ReasonSheet(kind: DecisionKind, onDismiss: () -> Unit, onReason: (St
 }
 
 @Composable
-private fun PremiumCard(
+internal fun PremiumCard(
     color: Color = SurfaceRaised,
     border: Color = Hairline,
     modifier: Modifier = Modifier,
@@ -2040,392 +1958,11 @@ private fun PremiumCard(
 }
 
 @Composable
-private fun MoneyScreen(repository: SystemRepository) {
-    val today = LocalDate.now()
-    val period = SystemLogic.moneyPeriodFor(today)
-    val snapshot = SystemLogic.moneySnapshot(today, repository.moneyTransactions, repository.moneyReceivedPeriods)
-    val periodTransactions = repository.moneyTransactions.filter {
-        !it.date.isBefore(period.start) && !it.date.isAfter(period.end)
-    }
-    val previousPeriod = SystemLogic.previousMoneyPeriod(today)
-    val previousHasData = !previousPeriod.start.isBefore(SystemLogic.MONEY_START_DATE) &&
-        (previousPeriod.start in repository.moneyReceivedPeriods || repository.moneyTransactions.any {
-            !it.date.isBefore(previousPeriod.start) && !it.date.isAfter(previousPeriod.end)
-        })
-    var addingExpense by remember { mutableStateOf(false) }
-    var deleteCandidate by remember { mutableStateOf<Long?>(null) }
-    var revokeTransferArmed by remember { mutableStateOf(false) }
-    val haptics = LocalHapticFeedback.current
-
-    LazyColumn(
-        Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 30.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            ScreenHeader("Money", "Финансы", "До следующего перевода — без сюрпризов.")
-        }
-        if (today.isBefore(SystemLogic.MONEY_START_DATE)) {
-            item {
-                PremiumCard(color = Acid.copy(alpha = .07f), border = Acid.copy(alpha = .30f)) {
-                    Text("СТАРТ 1 СЕНТЯБРЯ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
-                    Spacer(Modifier.height(12.dp))
-                    Text("20 000 ₽ на полмесяца", color = Paper, style = MaterialTheme.typography.headlineMedium)
-                    Spacer(Modifier.height(7.dp))
-                    val days = ChronoUnit.DAYS.between(today, SystemLogic.MONEY_START_DATE)
-                    Text("До первого периода — $days ${dayWord(days)}. После перевода нажми «Перевод получен».", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        } else {
-            item { MoneyHero(snapshot, today) }
-            item {
-                if (!snapshot.transferReceived) {
-                    PremiumCard(color = Acid.copy(alpha = .06f), border = Acid.copy(alpha = .28f)) {
-                        Text("ПЕРЕВОД", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
-                        Spacer(Modifier.height(9.dp))
-                        Text("Подтверди получение 20 000 ₽", color = Paper, style = MaterialTheme.typography.titleLarge)
-                        Spacer(Modifier.height(5.dp))
-                        Text("Сумма появится в бюджете только после фактического перевода.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                        Spacer(Modifier.height(16.dp))
-                        HseActionButton("ПЕРЕВОД ПОЛУЧЕН") {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            repository.confirmMoneyTransfer(period.start)
-                        }
-                    }
-                } else {
-                    PremiumCard(color = SurfaceSoft) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(34.dp).background(Acid, CircleShape), contentAlignment = Alignment.Center) {
-                                Text("✓", color = Ink, fontWeight = FontWeight.Black, fontSize = 18.sp)
-                            }
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("20 000 ₽ ПОЛУЧЕНЫ", color = Paper, style = MaterialTheme.typography.labelLarge)
-                                Text(moneyPeriodLabel(period), color = Muted, style = MaterialTheme.typography.bodyMedium)
-                            }
-                            Text(
-                                if (revokeTransferArmed) "ОТМЕНИТЬ?" else "ИСПРАВИТЬ",
-                                color = if (revokeTransferArmed) Danger else Muted,
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable {
-                                    if (revokeTransferArmed) {
-                                        repository.revokeMoneyTransfer(period.start)
-                                        revokeTransferArmed = false
-                                    } else {
-                                        revokeTransferArmed = true
-                                    }
-                                }.padding(8.dp),
-                            )
-                        }
-                    }
-                }
-            }
-            item {
-                HseActionButton(
-                    label = "+ ДОБАВИТЬ РАСХОД",
-                    enabled = snapshot.transferReceived || snapshot.carryIn > 0L,
-                ) { addingExpense = true }
-            }
-            item { MoneyPeriodSummary(snapshot) }
-            item {
-                SectionLabel("ОПЕРАЦИИ", if (periodTransactions.isEmpty()) "ПОКА ПУСТО" else "${periodTransactions.size}")
-            }
-            if (periodTransactions.isEmpty()) {
-                item {
-                    PremiumCard(color = SurfaceRaised) {
-                        Text("Расходов пока нет", color = Paper, style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(5.dp))
-                        Text("Добавляй их сразу после оплаты — так прогноз останется точным.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            } else {
-                item {
-                    PremiumCard(color = SurfaceRaised) {
-                        periodTransactions.sortedByDescending { it.id }.take(15).forEachIndexed { index, transaction ->
-                            MoneyTransactionRow(
-                                transaction = transaction,
-                                today = today,
-                                deleteArmed = deleteCandidate == transaction.id,
-                                onDelete = {
-                                    if (deleteCandidate == transaction.id) {
-                                        repository.deleteMoneyExpense(transaction.id)
-                                        deleteCandidate = null
-                                    } else {
-                                        deleteCandidate = transaction.id
-                                    }
-                                },
-                            )
-                            if (index != periodTransactions.take(15).lastIndex) {
-                                HorizontalDivider(color = Hairline, modifier = Modifier.padding(vertical = 12.dp))
-                            }
-                        }
-                    }
-                }
-            }
-            if (previousHasData) {
-                item {
-                    MoneyReportCard(
-                        SystemLogic.moneyReport(previousPeriod, repository.moneyTransactions, repository.moneyReceivedPeriods)
-                    )
-                }
-            }
-        }
-    }
-
-    if (addingExpense) {
-        AddMoneyExpenseSheet(
-            onDismiss = { addingExpense = false },
-            onAdd = { amount, category, planned ->
-                repository.addMoneyExpense(amount, category, planned)
-                addingExpense = false
-            },
-        )
-    }
-}
-
-@Composable
-private fun MoneyHero(snapshot: MoneySnapshot, today: LocalDate) {
-    val statusColor = when (snapshot.status) {
-        MoneyStatus.WAITING -> Muted
-        MoneyStatus.CALM -> Acid
-        MoneyStatus.WATCH -> Amber
-        MoneyStatus.SAVE -> Danger
-    }
-    val statusLabel = when (snapshot.status) {
-        MoneyStatus.WAITING -> "ОЖИДАЕТ ПЕРЕВОДА"
-        MoneyStatus.CALM -> "СПОКОЙНЫЙ ТЕМП"
-        MoneyStatus.WATCH -> "ВНИМАНИЕ К ТЕМПУ"
-        MoneyStatus.SAVE -> "РЕЖИМ СОХРАНЕНИЯ"
-    }
-    val totalAvailable = snapshot.carryIn + if (snapshot.transferReceived) SystemLogic.MONEY_TRANSFER_RUBLES else 0L
-    val balanceProgress = if (totalAvailable <= 0L) 0f else (snapshot.balance.toFloat() / totalAvailable).coerceIn(0f, 1f)
-    val daysRemaining = ChronoUnit.DAYS.between(today.coerceIn(snapshot.period.start, snapshot.period.end), snapshot.period.end) + 1L
-    PremiumCard(color = statusColor.copy(alpha = .07f), border = statusColor.copy(alpha = .42f)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
-            Text("$daysRemaining ${dayWord(daysRemaining)}", color = Muted, style = MaterialTheme.typography.labelMedium)
-        }
-        Spacer(Modifier.height(17.dp))
-        Text("ОСТАЛОСЬ", color = Muted, style = MaterialTheme.typography.labelMedium)
-        Spacer(Modifier.height(3.dp))
-        Text(formatMoney(snapshot.balance), color = Paper, style = MaterialTheme.typography.displayMedium)
-        Spacer(Modifier.height(15.dp))
-        Box(Modifier.fillMaxWidth().height(7.dp).background(Hairline, CircleShape)) {
-            Box(Modifier.fillMaxWidth(balanceProgress).fillMaxHeight().background(statusColor, CircleShape))
-        }
-        Spacer(Modifier.height(17.dp))
-        Row(Modifier.fillMaxWidth()) {
-            MoneyHeroMetric("МОЖНО В ДЕНЬ", formatMoney(snapshot.safePerDay), Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(42.dp).background(Hairline))
-            MoneyHeroMetric("РЕЗЕРВ", formatMoney(snapshot.reserveTarget), Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(15.dp))
-        Text(moneyForecastText(snapshot), color = statusColor, style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-@Composable
-private fun MoneyHeroMetric(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp)
-        Spacer(Modifier.height(4.dp))
-        Text(value, color = Paper, style = MaterialTheme.typography.titleMedium, maxLines = 1)
-    }
-}
-
-@Composable
-private fun MoneyPeriodSummary(snapshot: MoneySnapshot) {
-    PremiumCard(color = SurfaceSoft) {
-        Text("ТЕКУЩИЙ ПЕРИОД", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
-        Spacer(Modifier.height(13.dp))
-        Row(Modifier.fillMaxWidth()) {
-            MoneySmallMetric("ПОТРАЧЕНО", snapshot.spent, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(48.dp).background(Hairline))
-            MoneySmallMetric("СПОНТАННО", snapshot.unplannedSpent, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(48.dp).background(Hairline))
-            MoneySmallMetric("ДОСТУПНО", snapshot.safeToSpend.coerceAtLeast(0L), Modifier.weight(1f))
-        }
-        snapshot.topCategory?.let {
-            Spacer(Modifier.height(14.dp))
-            HorizontalDivider(color = Hairline)
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Больше всего", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                Text(it.label, color = Paper, style = MaterialTheme.typography.labelLarge)
-            }
-        }
-    }
-}
-
-@Composable
-private fun MoneySmallMetric(label: String, value: Long, modifier: Modifier = Modifier) {
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(formatMoney(value), color = Paper, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1)
-        Spacer(Modifier.height(4.dp))
-        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 8.sp, maxLines = 1)
-    }
-}
-
-@Composable
-private fun MoneyTransactionRow(
-    transaction: MoneyTransaction,
-    today: LocalDate,
-    deleteArmed: Boolean,
-    onDelete: () -> Unit,
-) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(38.dp).background(if (transaction.planned) Acid.copy(alpha = .12f) else Danger.copy(alpha = .11f), CircleShape), contentAlignment = Alignment.Center) {
-            Text(if (transaction.planned) "П" else "С", color = if (transaction.planned) Acid else Danger, style = MaterialTheme.typography.labelLarge)
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(transaction.category.label, color = Paper, style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (transaction.date == today) "Сегодня" else transaction.date.format(DateTimeFormatter.ofPattern("d MMMM", Ru)),
-                color = Muted,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        Column(horizontalAlignment = Alignment.End) {
-            Text("−${formatMoney(transaction.amountRubles)}", color = Paper, style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (deleteArmed) "УДАЛИТЬ?" else "×",
-                color = if (deleteArmed) Danger else Muted,
-                fontSize = if (deleteArmed) 9.sp else 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onDelete).padding(horizontal = 7.dp, vertical = 2.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun MoneyReportCard(report: MoneyReport) {
-    PremiumCard(color = Acid.copy(alpha = .05f), border = Acid.copy(alpha = .25f)) {
-        Text("ОТЧЁТ · ${moneyPeriodLabel(report.period).uppercase(Ru)}", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.3.sp)
-        Spacer(Modifier.height(12.dp))
-        Text(if (report.endingBalance >= 0L) "Деньги дожили до перевода" else "Период закрыт с дефицитом", color = Paper, style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(16.dp))
-        MoneyReportRow("Получено", report.income)
-        MoneyReportRow("Потрачено", report.spent)
-        MoneyReportRow("Перенесено", report.endingBalance)
-        MoneyReportRow("Спонтанные расходы", report.unplannedSpent)
-        report.topCategory?.let {
-            Spacer(Modifier.height(8.dp))
-            Text("Главная категория — ${it.label.lowercase(Ru)}.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-}
-
-@Composable
-private fun MoneyReportRow(label: String, amount: Long) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = Muted, style = MaterialTheme.typography.bodyMedium)
-        Text(formatMoney(amount), color = Paper, style = MaterialTheme.typography.labelLarge)
-    }
-}
-
-@Composable
-private fun AddMoneyExpenseSheet(
-    onDismiss: () -> Unit,
-    onAdd: (Long, MoneyCategory, Boolean) -> Unit,
-) {
-    var amount by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf(MoneyCategory.GROCERIES) }
-    var planned by remember { mutableStateOf(true) }
-    val amountValue = amount.toLongOrNull()?.takeIf { it in 1L..1_000_000L }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = SurfaceRaised,
-        contentColor = Paper,
-        dragHandle = { Box(Modifier.padding(top = 11.dp).size(42.dp, 4.dp).background(Hairline, CircleShape)) },
-    ) {
-        Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Text("НОВЫЙ РАСХОД", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
-            BasicTextField(
-                value = amount,
-                onValueChange = { amount = it.filter(Char::isDigit).take(7) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                textStyle = MaterialTheme.typography.displayMedium.copy(color = Paper),
-                cursorBrush = SolidColor(Acid),
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(SurfaceSoft).padding(16.dp),
-                decorationBox = { inner ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f)) {
-                            if (amount.isBlank()) Text("0", color = Muted, style = MaterialTheme.typography.displayMedium)
-                            inner()
-                        }
-                        Text("₽", color = Acid, style = MaterialTheme.typography.headlineLarge)
-                    }
-                },
-            )
-            Text("КАТЕГОРИЯ", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.3.sp)
-            MoneyCategory.entries.chunked(2).forEach { rowCategories ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    rowCategories.forEach { option ->
-                        val selected = category == option
-                        Box(
-                            Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(13.dp))
-                                .background(if (selected) Acid else SurfaceSoft)
-                                .border(1.dp, if (selected) Acid else Hairline, RoundedCornerShape(13.dp))
-                                .clickable { category = option },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(option.label, color = if (selected) Ink else Paper, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center)
-                        }
-                    }
-                    if (rowCategories.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
-            Text("ТИП РАСХОДА", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.3.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                listOf(true to "ПО ПЛАНУ", false to "СПОНТАННО").forEach { (value, label) ->
-                    val selected = planned == value
-                    Box(
-                        Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(13.dp))
-                            .background(if (selected) Acid else SurfaceSoft)
-                            .clickable { planned = value },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(label, color = if (selected) Ink else Muted, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-            HseActionButton("СОХРАНИТЬ РАСХОД", enabled = amountValue != null) {
-                amountValue?.let { onAdd(it, category, planned) }
-            }
-        }
-    }
-}
-
-private fun moneyForecastText(snapshot: MoneySnapshot): String = when {
-    !snapshot.transferReceived -> "Подтверди перевод — после этого появится точный дневной темп."
-    snapshot.balance < snapshot.reserveTarget -> "Резерв уже затронут. Сократи необязательные расходы до следующего перевода."
-    snapshot.spent == 0L -> "Темп сформируется после первого расхода."
-    snapshot.projectedSafeEnd != null && !snapshot.projectedSafeEnd.isAfter(snapshot.period.end) ->
-        "Безопасная часть бюджета закончится ${snapshot.projectedSafeEnd.format(DateTimeFormatter.ofPattern("d MMMM", Ru))}."
-    else -> "При текущем темпе денег хватает до следующего перевода."
-}
-
-private fun moneyPeriodLabel(period: MoneyPeriod): String =
-    "${period.start.dayOfMonth}–${period.end.format(DateTimeFormatter.ofPattern("d MMMM", Ru))}"
-
-private fun formatMoney(value: Long): String = "${NumberFormat.getIntegerInstance(Ru).format(value)} ₽"
-
-private fun dayWord(value: Long): String = when {
-    value % 100 in 11L..14L -> "дней"
-    value % 10 == 1L -> "день"
-    value % 10 in 2L..4L -> "дня"
-    else -> "дней"
-}
-
-@Composable
 private fun AssignmentsScreen(repository: SystemRepository) {
     var adding by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<StudyAssignment?>(null) }
+    var deleteCandidate by remember { mutableStateOf<Long?>(null) }
+    var showCompleted by remember { mutableStateOf(false) }
     val today = LocalDate.now()
     val active = repository.assignments.filterNot { it.completed }
     val completed = repository.assignments.filter { it.completed }
@@ -2471,20 +2008,41 @@ private fun AssignmentsScreen(repository: SystemRepository) {
                             assignment = assignment,
                             today = today,
                             onToggle = { repository.toggleAssignment(assignment.id) },
-                            onDelete = { repository.deleteAssignment(assignment.id) },
+                            onEdit = { editing = assignment },
+                            deleteArmed = deleteCandidate == assignment.id,
+                            onDelete = {
+                                if (deleteCandidate == assignment.id) {
+                                    repository.deleteAssignment(assignment.id)
+                                    deleteCandidate = null
+                                } else deleteCandidate = assignment.id
+                            },
                         )
                     }
                 }
             }
         }
         if (completed.isNotEmpty()) {
-            item { SectionLabel("ВЫПОЛНЕНО", "${completed.size}") }
-            items(completed, key = { it.id }) { assignment ->
+            item {
+                PremiumCard(modifier = Modifier.clickable { showCompleted = !showCompleted }, color = SurfaceRaised.copy(alpha = .6f)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("ВЫПОЛНЕНО", color = Muted, style = MaterialTheme.typography.labelLarge)
+                        Text("${completed.size} ${if (showCompleted) "↑" else "↓"}", color = Acid, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+            if (showCompleted) items(completed, key = { it.id }) { assignment ->
                 AssignmentCard(
                     assignment = assignment,
                     today = today,
                     onToggle = { repository.toggleAssignment(assignment.id) },
-                    onDelete = { repository.deleteAssignment(assignment.id) },
+                    onEdit = { editing = assignment },
+                    deleteArmed = deleteCandidate == assignment.id,
+                    onDelete = {
+                        if (deleteCandidate == assignment.id) {
+                            repository.deleteAssignment(assignment.id)
+                            deleteCandidate = null
+                        } else deleteCandidate = assignment.id
+                    },
                 )
             }
         }
@@ -2492,10 +2050,23 @@ private fun AssignmentsScreen(repository: SystemRepository) {
 
     if (adding) {
         AddAssignmentSheet(
+            existing = null,
             onDismiss = { adding = false },
             onAdd = { title, subject, date, priority ->
                 repository.addAssignment(title, subject, date, priority)
                 adding = false
+            },
+        )
+    }
+    editing?.let { assignment ->
+        AddAssignmentSheet(
+            existing = assignment,
+            onDismiss = { editing = null },
+            onAdd = { title, subject, date, priority ->
+                repository.updateAssignment(
+                    assignment.copy(title = title, subject = subject, dueDate = date, priority = priority)
+                )
+                editing = null
             },
         )
     }
@@ -2506,14 +2077,13 @@ private fun AssignmentCard(
     assignment: StudyAssignment,
     today: LocalDate,
     onToggle: () -> Unit,
+    onEdit: () -> Unit,
+    deleteArmed: Boolean,
     onDelete: () -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
     PremiumCard(
-        modifier = Modifier.clickable {
-            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            onToggle()
-        },
+        modifier = Modifier.clickable(onClick = onEdit),
         color = if (assignment.completed) SurfaceRaised.copy(alpha = .55f) else SurfaceRaised,
         border = when {
             assignment.completed -> Hairline
@@ -2524,7 +2094,10 @@ private fun AssignmentCard(
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(23.dp).border(1.5.dp, if (assignment.completed) Acid else Muted, CircleShape)
+                Modifier.size(48.dp).clip(CircleShape).clickable {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onToggle()
+                }.border(1.5.dp, if (assignment.completed) Acid else Muted, CircleShape)
                     .background(if (assignment.completed) Acid else Color.Transparent, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
@@ -2546,9 +2119,9 @@ private fun AssignmentCard(
                 )
             }
             Text(
-                "×",
-                color = Muted,
-                fontSize = 23.sp,
+                if (deleteArmed) "УДАЛИТЬ?" else "×",
+                color = if (deleteArmed) Danger else Muted,
+                fontSize = if (deleteArmed) 10.sp else 23.sp,
                 modifier = Modifier.clip(CircleShape).clickable(onClick = onDelete).padding(8.dp),
             )
         }
@@ -2563,13 +2136,15 @@ private fun assignmentDueLabel(date: LocalDate, today: LocalDate): String = when
 
 @Composable
 private fun AddAssignmentSheet(
+    existing: StudyAssignment?,
     onDismiss: () -> Unit,
     onAdd: (String, String, LocalDate, AssignmentPriority) -> Unit,
 ) {
-    var title by remember { mutableStateOf("") }
-    var subject by remember { mutableStateOf("") }
-    var dueDate by remember { mutableStateOf(LocalDate.now()) }
-    var priority by remember { mutableStateOf(AssignmentPriority.NORMAL) }
+    val context = LocalContext.current
+    var title by remember(existing?.id) { mutableStateOf(existing?.title.orEmpty()) }
+    var subject by remember(existing?.id) { mutableStateOf(existing?.subject.orEmpty()) }
+    var dueDate by remember(existing?.id) { mutableStateOf(existing?.dueDate ?: LocalDate.now()) }
+    var priority by remember(existing?.id) { mutableStateOf(existing?.priority ?: AssignmentPriority.NORMAL) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = SurfaceRaised,
@@ -2577,13 +2152,24 @@ private fun AddAssignmentSheet(
         dragHandle = { Box(Modifier.padding(top = 11.dp).size(42.dp, 4.dp).background(Hairline, CircleShape)) },
     ) {
         Column(Modifier.padding(20.dp).padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("НОВОЕ ЗАДАНИЕ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
+            Text(if (existing == null) "НОВОЕ ЗАДАНИЕ" else "ИЗМЕНИТЬ ЗАДАНИЕ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
             AssignmentTextField(title, { title = it.take(100) }, "Что нужно сделать")
             AssignmentTextField(subject, { subject = it.take(60) }, "Предмет — необязательно")
-            PremiumCard(color = SurfaceSoft) {
+            PremiumCard(
+                color = SurfaceSoft,
+                modifier = Modifier.clickable {
+                    android.app.DatePickerDialog(
+                        context,
+                        { _, year, month, day -> dueDate = LocalDate.of(year, month + 1, day) },
+                        dueDate.year,
+                        dueDate.monthValue - 1,
+                        dueDate.dayOfMonth,
+                    ).show()
+                },
+            ) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Дедлайн", color = Paper, style = MaterialTheme.typography.titleMedium)
+                        Text("Дедлайн · нажми, чтобы выбрать", color = Paper, style = MaterialTheme.typography.titleMedium)
                         Text(assignmentDueLabel(dueDate, LocalDate.now()), color = Acid, style = MaterialTheme.typography.labelMedium)
                     }
                     MiniButton("−", "На день раньше") { dueDate = dueDate.minusDays(1).coerceAtLeast(LocalDate.now()) }
@@ -2594,7 +2180,7 @@ private fun AddAssignmentSheet(
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 AssignmentPriority.entries.forEach { option ->
                     Box(
-                        Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(13.dp))
+                        Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(13.dp))
                             .background(if (priority == option) Acid else SurfaceSoft)
                             .clickable { priority = option },
                         contentAlignment = Alignment.Center,
@@ -2603,16 +2189,18 @@ private fun AddAssignmentSheet(
                     }
                 }
             }
-            HseActionButton("ДОБАВИТЬ") { onAdd(title, subject, dueDate, priority) }
+            HseActionButton(if (existing == null) "ДОБАВИТЬ" else "СОХРАНИТЬ", enabled = title.isNotBlank()) {
+                onAdd(title, subject, dueDate, priority)
+            }
         }
     }
 }
 
 @Composable
-private fun AssignmentTextField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
+internal fun AssignmentTextField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
     BasicTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { input -> onValueChange(input.replaceFirstChar { it.uppercase() }) },
         singleLine = true,
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = Paper),
@@ -2664,7 +2252,12 @@ private fun HistoryScreen(
             onMorningYes = {
                 if (SystemLogic.toggledDecision(repository.recordFor(date).morning, DecisionStatus.YES) == null) repository.clearMorning(date)
                 else {
-                    repository.setMorning(date, DecisionStatus.YES)
+                    val target = SystemLogic.admissionFor(
+                        date,
+                        repository.settings.admissionStart,
+                        repository.records.values,
+                    ).target
+                    repository.setMorningRepetitions(date, target, target)
                     onCelebrate(DecisionKind.MORNING)
                 }
             },
@@ -2794,14 +2387,22 @@ private fun CalendarDay(
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
-    val good = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.YES }
-    val bad = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.NO }
+    val statuses = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep)
+    val statusDescription = listOf("Утро", "Свет", "Питание", "Вода", "Сон")
+        .zip(statuses)
+        .joinToString { (label, status) ->
+            "$label: ${when (status) { DecisionStatus.YES -> "соблюдено"; DecisionStatus.NO -> "нарушено"; null -> "нет отметки" }}"
+        }
     Box(
         modifier
             .aspectRatio(1f)
             .padding(2.dp)
             .clip(RoundedCornerShape(12.dp))
             .then(if (isToday) Modifier.border(1.dp, Acid, RoundedCornerShape(12.dp)) else Modifier)
+            .semantics {
+                contentDescription = "${date.format(DateTimeFormatter.ofPattern("d MMMM yyyy", Ru))}. $statusDescription"
+                role = Role.Button
+            }
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -2809,11 +2410,17 @@ private fun CalendarDay(
             Text(date.dayOfMonth.toString(), color = if (enabled) Paper else Muted.copy(alpha = .35f), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (record == null || (record.sleep == null && record.morning == null && record.light == null && record.diet == null && record.water == null)) {
-                    Box(Modifier.size(3.dp).background(Hairline, CircleShape))
-                } else {
-                    repeat(good) { Box(Modifier.size(4.dp).background(Acid, CircleShape)) }
-                    repeat(bad) { Box(Modifier.size(4.dp).background(Danger, CircleShape)) }
+                statuses.forEach { status ->
+                    Box(
+                        Modifier.size(4.dp).background(
+                            when (status) {
+                                DecisionStatus.YES -> Acid
+                                DecisionStatus.NO -> Danger
+                                null -> Hairline
+                            },
+                            CircleShape,
+                        )
+                    )
                 }
             }
         }
@@ -2824,7 +2431,7 @@ private fun CalendarDay(
 private fun CircleTextButton(text: String, description: String, onClick: () -> Unit, enabled: Boolean = true) {
     Box(
         Modifier
-            .size(38.dp)
+            .size(48.dp)
             .clip(CircleShape)
             .background(SurfaceSoft)
             .clickable(enabled = enabled, onClick = onClick)
@@ -2857,30 +2464,39 @@ private fun LegendDot(color: Color, label: String) {
 
 @Composable
 private fun MonthSummary(records: List<DailyRecord>) {
-    val sleep = SystemLogic.compliance(records) { it.sleep }
-    val morning = SystemLogic.compliance(records) { it.morning }
-    val light = SystemLogic.compliance(records) { it.light }
-    val diet = SystemLogic.compliance(records) { it.diet }
-    val water = SystemLogic.compliance(records) { it.water }
+    val eligible = records.size
+    val metrics = listOf(
+        "УТРО" to SystemLogic.complianceStat(records, eligible) { it.morning },
+        "СВЕТ" to SystemLogic.complianceStat(records, eligible) { it.light },
+        "ПИТАНИЕ" to SystemLogic.complianceStat(records, eligible) { it.diet },
+        "ВОДА" to SystemLogic.complianceStat(records, eligible) { it.water },
+        "СОН" to SystemLogic.complianceStat(records, eligible) { it.sleep },
+    )
     PremiumCard(color = SurfaceSoft) {
         Text("ИТОГ МЕСЯЦА", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
         Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth()) {
-            CompactMetric("УТРО", morning, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
-            CompactMetric("СВЕТ", light, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
-            CompactMetric("ПИТАНИЕ", diet, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
-            CompactMetric("ВОДА", water, Modifier.weight(1f))
-            Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
-            CompactMetric("СОН", sleep, Modifier.weight(1f))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            metrics.take(2).forEach { (label, stat) ->
+                CompactMetric(label, stat.value, Modifier.weight(1f), coverage = "${stat.answered}/${stat.eligible}")
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            metrics.drop(2).forEach { (label, stat) ->
+                CompactMetric(label, stat.value, Modifier.weight(1f), coverage = "${stat.answered}/${stat.eligible}")
+            }
         }
     }
 }
 
 @Composable
-private fun CompactMetric(label: String, value: Int?, modifier: Modifier, suffix: String = "%") {
+private fun CompactMetric(
+    label: String,
+    value: Int?,
+    modifier: Modifier,
+    suffix: String = "%",
+    coverage: String? = null,
+) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             value?.let { "$it$suffix" } ?: "—",
@@ -2894,7 +2510,8 @@ private fun CompactMetric(label: String, value: Int?, modifier: Modifier, suffix
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
-        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 10.sp, maxLines = 1)
+        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, fontSize = 12.sp, maxLines = 1)
+        coverage?.let { Text(it, color = Muted, fontSize = 11.sp) }
     }
 }
 
@@ -2932,7 +2549,9 @@ private fun HistoryDayScreen(
             }
         }
         item { HistoryDecisionRow("УТРО", "$admissionTarget ${pushupWord(admissionTarget)} подряд", record.morning, onMorningYes, onMorningNo) }
-        item { HistoryDecisionRow("СВЕТ", "День ${lightPlan.day}: ${lightPlan.task}", record.light, onLightYes, onLightNo) }
+        if (!lightPlan.completed) item {
+            HistoryDecisionRow("СВЕТ", "День ${lightPlan.day}: ${lightPlan.task}", record.light, onLightYes, onLightNo)
+        }
         item { HistoryDecisionRow("ПИТАНИЕ", "Без сладкого и без чипсов", record.diet, onDietYes, onDietNo) }
         item { HistoryDecisionRow("ВОДА", "2,5 литра за день", record.water, onWaterYes, onWaterNo) }
         item { HistoryDecisionRow("СОН", "Отбой и кровать вовремя", record.sleep, onSleepYes, onSleepNo) }
@@ -2970,8 +2589,8 @@ private fun HistoryDecisionRow(
         }
         Spacer(Modifier.height(14.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            DecisionButton("ДА", status == DecisionStatus.YES, true, Modifier.weight(1f), onYes)
-            DecisionButton("НЕТ", status == DecisionStatus.NO, false, Modifier.weight(1f), onNo)
+            DecisionButton("ДА", "$title: Да", status == DecisionStatus.YES, true, Modifier.weight(1f), onYes)
+            DecisionButton("НЕТ", "$title: Нет", status == DecisionStatus.NO, false, Modifier.weight(1f), onNo)
         }
     }
 }
@@ -2986,7 +2605,7 @@ private fun PreviousDayReminderScreen(
     modifier: Modifier = Modifier,
 ) {
     val record = repository.recordFor(date)
-    val missing = SystemLogic.missingTasks(record)
+    val missing = SystemLogic.missingTasks(record, SystemLogic.activeTasks(date, repository.settings))
     val admission = SystemLogic.admissionFor(date, repository.settings.admissionStart, repository.records.values)
     val lightPlan = SystemLogic.lightPlanFor(date, repository.settings.lightStart)
 
@@ -3030,16 +2649,42 @@ private fun StatsScreen(
     repository: SystemRepository,
     hseMode: Boolean = false,
     onOpenHistory: (() -> Unit)? = null,
+    openWeeklyReport: Boolean = false,
+    onWeeklyReportOpened: () -> Unit = {},
 ) {
     val today = LocalDate.now()
+    var showWeeklyReport by remember { mutableStateOf(false) }
+    LaunchedEffect(openWeeklyReport) {
+        if (openWeeklyReport) {
+            showWeeklyReport = true
+            onWeeklyReportOpened()
+        }
+    }
+    if (showWeeklyReport) {
+        WeeklyReportScreen(
+            SystemLogic.weeklyReport(today, repository.records.values, repository.experimentFeedback),
+            onBack = { showWeeklyReport = false },
+        )
+        return
+    }
     val recentRecords = repository.records.values.filter {
         !it.date.isBefore(today.minusDays(29)) && !it.date.isAfter(today)
     }
-    val sleep = SystemLogic.compliance(recentRecords) { it.sleep }
-    val morning = SystemLogic.compliance(recentRecords) { it.morning }
-    val light = SystemLogic.compliance(recentRecords) { it.light }
-    val diet = SystemLogic.compliance(recentRecords) { it.diet }
-    val water = SystemLogic.compliance(recentRecords) { it.water }
+    fun eligibleDays(start: LocalDate, end: LocalDate = today): Int {
+        val windowStart = maxOf(today.minusDays(29), start)
+        val windowEnd = minOf(today, end)
+        return if (windowEnd.isBefore(windowStart)) 0 else (ChronoUnit.DAYS.between(windowStart, windowEnd) + 1).toInt()
+    }
+    val standardEligible = eligibleDays(repository.settings.admissionStart)
+    val lightEligible = eligibleDays(
+        repository.settings.lightStart,
+        repository.settings.lightStart.plusDays(SystemLogic.LIGHT_PLAN_DAYS.toLong() - 1L),
+    )
+    val sleep = SystemLogic.complianceStat(recentRecords, standardEligible) { it.sleep }
+    val morning = SystemLogic.complianceStat(recentRecords, standardEligible) { it.morning }
+    val light = SystemLogic.complianceStat(recentRecords, lightEligible) { it.light }
+    val diet = SystemLogic.complianceStat(recentRecords, standardEligible) { it.diet }
+    val water = SystemLogic.complianceStat(recentRecords, standardEligible) { it.water }
     val correlations = SystemLogic.correlationAnalysis(repository.records.values)
     val sleepReasons = ViolationReason.entries.associate { reason -> reason.label to
         recentRecords.sumOf { record ->
@@ -3082,6 +2727,23 @@ private fun StatsScreen(
             }
         }
         item {
+            PremiumCard(
+                modifier = Modifier.clickable(onClick = { showWeeklyReport = true }),
+                color = Acid.copy(alpha = .065f),
+                border = Acid.copy(alpha = .38f),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("НЕДЕЛЬНЫЙ ОТЧЁТ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
+                        Spacer(Modifier.height(7.dp))
+                        Text("Открыть картину недели", color = Paper, style = MaterialTheme.typography.titleLarge)
+                        Text("Выполнение, полнота, причины и один эксперимент", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("→", color = Acid, style = MaterialTheme.typography.headlineMedium)
+                }
+            }
+        }
+        item {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     MetricRing("УТРО", morning, Modifier.weight(1f))
@@ -3094,7 +2756,7 @@ private fun StatsScreen(
                 }
             }
         }
-        item { LastSevenDays(repository.records, today) }
+        item { LastSevenDays(repository.records, today, repository.settings) }
         item { CorrelationAnalysisCard(correlations) }
         item { ReasonAnalysis("ПРИЧИНЫ НАРУШЕНИЯ СНА", sleepReasons) }
         item { ReasonAnalysis("ПРИЧИНЫ НАРУШЕНИЯ ПИТАНИЯ", dietReasons) }
@@ -3145,10 +2807,15 @@ private fun WeeklyReportScreen(report: WeeklyReport, onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(20.dp))
-                Row(Modifier.fillMaxWidth()) {
-                    report.metrics.forEachIndexed { index, metric ->
-                        CompactMetric(metric.label, metric.value, Modifier.weight(1f))
-                        if (index < report.metrics.lastIndex) Box(Modifier.width(1.dp).height(50.dp).background(Hairline))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    report.metrics.take(2).forEach { metric ->
+                        CompactMetric(metric.label, metric.value, Modifier.weight(1f), coverage = "${metric.answered}/${metric.eligible}")
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    report.metrics.drop(2).forEach { metric ->
+                        CompactMetric(metric.label, metric.value, Modifier.weight(1f), coverage = "${metric.answered}/${metric.eligible}")
                     }
                 }
             }
@@ -3254,8 +2921,8 @@ private fun CorrelationAnalysisCard(analysis: com.personal.thesystem.model.Corre
 }
 
 @Composable
-private fun MetricRing(label: String, value: Int?, modifier: Modifier) {
-    val target = (value ?: 0) / 100f
+private fun MetricRing(label: String, stat: com.personal.thesystem.model.ComplianceStat, modifier: Modifier) {
+    val target = (stat.value ?: 0) / 100f
     val animated by animateFloatAsState(target, spring(stiffness = Spring.StiffnessLow), label = "metric")
     PremiumCard(modifier = modifier) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -3273,7 +2940,7 @@ private fun MetricRing(label: String, value: Int?, modifier: Modifier) {
                         drawArc(Acid, -215f, 250f * animated, false, style = Stroke(stroke, cap = StrokeCap.Round))
                     }
                     Text(
-                        value?.let { "$it%" } ?: "—",
+                        stat.value?.let { "$it%" } ?: "—",
                         color = Paper,
                         fontWeight = FontWeight.Bold,
                         fontSize = if (compact) 16.sp else 26.sp,
@@ -3286,38 +2953,41 @@ private fun MetricRing(label: String, value: Int?, modifier: Modifier) {
                     label,
                     color = Muted,
                     style = MaterialTheme.typography.labelMedium,
-                    fontSize = if (compact) 8.sp else 10.sp,
+                    fontSize = if (compact) 11.sp else 12.sp,
                     maxLines = 1,
                     softWrap = false,
                 )
+                Spacer(Modifier.height(3.dp))
+                Text("${stat.answered}/${stat.eligible}", color = Muted, fontSize = 11.sp)
             }
         }
     }
 }
 
 @Composable
-private fun LastSevenDays(records: Map<LocalDate, DailyRecord>, today: LocalDate) {
+private fun LastSevenDays(records: Map<LocalDate, DailyRecord>, today: LocalDate, settings: SystemSettings) {
     PremiumCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("ПОСЛЕДНИЕ 7 ДНЕЙ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
-            Text("5 ЗАДАЧ", color = Muted, style = MaterialTheme.typography.labelMedium)
+            Text("ЧЕСТНЫЕ ОТМЕТКИ", color = Muted, style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.height(22.dp))
         Row(Modifier.fillMaxWidth().height(116.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
             (6 downTo 0).map { today.minusDays(it.toLong()) }.forEach { date ->
                 val record = records[date]
-                val answered = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it != null }
-                val yes = listOf(record?.morning, record?.light, record?.diet, record?.water, record?.sleep).count { it == DecisionStatus.YES }
-                val fraction = if (answered == 0) 0.04f else yes / 5f
+                val active = SystemLogic.activeTasks(date, settings)
+                val answered = active.count { task -> record?.let { SystemLogic.statusFor(it, task) } != null }
+                val yes = active.count { task -> record?.let { SystemLogic.statusFor(it, task) } == DecisionStatus.YES }
+                val fraction = if (answered == 0) 0.04f else yes / active.size.toFloat()
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom, modifier = Modifier.width(30.dp)) {
                     Box(
                         Modifier
                             .width(9.dp)
                             .height((74 * max(.06f, fraction)).dp)
-                            .background(if (answered == 0) Hairline else if (yes == 5) Acid else if (yes > 0) Amber else Danger, CircleShape)
+                            .background(if (answered == 0) Hairline else if (yes == active.size) Acid else if (yes > 0) Amber else Danger, CircleShape)
                     )
                     Spacer(Modifier.height(10.dp))
-                    Text(date.dayOfWeek.getDisplayName(TextStyle.SHORT, Ru).take(2).uppercase(Ru), color = if (date == today) Paper else Muted, style = MaterialTheme.typography.labelMedium, fontSize = 9.sp)
+                    Text(date.dayOfWeek.getDisplayName(TextStyle.SHORT, Ru).take(2).uppercase(Ru), color = if (date == today) Paper else Muted, style = MaterialTheme.typography.labelMedium, fontSize = 11.sp)
                 }
             }
         }
@@ -3345,237 +3015,4 @@ private fun ReasonAnalysis(title: String, reasons: Map<String, Int>) {
             Spacer(Modifier.height(13.dp))
         }
     }
-}
-
-@Composable
-private fun SettingsScreen(
-    settings: SystemSettings,
-    records: Collection<DailyRecord>,
-    onUpdate: ((SystemSettings) -> SystemSettings) -> Unit,
-    onEnableNotifications: () -> Unit,
-    onRequestExactAlarmAccess: () -> Unit,
-    exactAlarmsAllowed: Boolean,
-) {
-    val context = LocalContext.current
-    LazyColumn(
-        Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 28.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        item { ScreenHeader("Настройки", "Режим", "График уведомлений и напоминаний.") }
-        item {
-            SettingsGroup("РАСПИСАНИЕ") {
-                TimeSettingRow("Цифровой отбой", "Телефон и ноутбук выключены", settings.digitalCutoff) { delta ->
-                    onUpdate { it.copy(digitalCutoff = it.digitalCutoff.plusMinutes(delta.toLong())) }
-                }
-                SettingsDivider()
-                TimeSettingRow("В кровати", "Свет выключен", settings.bedTime) { delta ->
-                    onUpdate { it.copy(bedTime = it.bedTime.plusMinutes(delta.toLong())) }
-                }
-                SettingsDivider()
-                TimeSettingRow("Утренний триггер", "Сразу после пробуждения", settings.morningTime) { delta ->
-                    onUpdate { it.copy(morningTime = it.morningTime.plusMinutes(delta.toLong())) }
-                }
-                SettingsDivider()
-                TimeSettingRow("Питание", "Напомнить отметить день", settings.dietTime) { delta ->
-                    onUpdate { it.copy(dietTime = it.dietTime.plusMinutes(delta.toLong())) }
-                }
-            }
-        }
-        item {
-            SettingsGroup("РЕЖИМ ВШЭ") {
-                ToggleSettingRow(
-                    "Учебный режим",
-                    "Всё для студента!",
-                    settings.hseModeEnabled,
-                ) { enabled -> onUpdate { it.copy(hseModeEnabled = enabled) } }
-                if (settings.hseModeEnabled) {
-                    SettingsDivider()
-                    TimeSettingRow("Первая пара", "Единое время для будних дней", settings.hseFirstClassTime) { delta ->
-                        onUpdate { it.copy(hseFirstClassTime = it.hseFirstClassTime.plusMinutes(delta.toLong())) }
-                    }
-                    SettingsDivider()
-                    AddressSettingRow(
-                        title = "Домашний адрес",
-                        detail = "Хранится только на этом устройстве",
-                        value = settings.hseHomeAddress,
-                        placeholder = "Улица, дом",
-                    ) { address -> onUpdate { it.copy(hseHomeAddress = address.take(120)) } }
-                    SettingsDivider()
-                    Column {
-                        Text("Корпус ВШЭ", color = Paper, style = MaterialTheme.typography.titleMedium)
-                        Text(settings.hseUniversityAddress, color = Acid, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            }
-        }
-        item {
-            SettingsGroup("НАПОМИНАНИЯ") {
-                ToggleSettingRow(
-                    "Локальные напоминания",
-                    when {
-                        !settings.notificationsEnabled -> "Нужно разрешение Android"
-                        !exactAlarmsAllowed -> "Разреши Android присылать их точно вовремя"
-                        else -> "Приходят точно по расписанию"
-                    },
-                    settings.notificationsEnabled && exactAlarmsAllowed,
-                ) { enabled ->
-                    if (enabled) onEnableNotifications() else onUpdate { it.copy(notificationsEnabled = false) }
-                }
-                SettingsDivider()
-                ToggleSettingRow("Предупреждение", "За 15 минут до отбоя", settings.warningEnabled) { value -> onUpdate { it.copy(warningEnabled = value) } }
-                SettingsDivider()
-                ToggleSettingRow("Цифровой отбой", SystemLogic.formatTime(settings.digitalCutoff), settings.cutoffEnabled) { value -> onUpdate { it.copy(cutoffEnabled = value) } }
-                SettingsDivider()
-                ToggleSettingRow("Подготовка ко сну", "За 30 минут до кровати", settings.preparationEnabled) { value -> onUpdate { it.copy(preparationEnabled = value) } }
-                SettingsDivider()
-                ToggleSettingRow("В кровати", SystemLogic.formatTime(settings.bedTime), settings.bedEnabled) { value -> onUpdate { it.copy(bedEnabled = value) } }
-                SettingsDivider()
-                ToggleSettingRow("Утренние отжимания", SystemLogic.formatTime(settings.morningTime), settings.morningEnabled) { value -> onUpdate { it.copy(morningEnabled = value) } }
-                SettingsDivider()
-                ToggleSettingRow(
-                    "Яндекс Музыка",
-                    if (settings.morningMusicEnabled && !exactAlarmsAllowed) "Нужно разрешить Android точный запуск" else "Каждое утро в 07:30 · исполнитель зависит от дня",
-                    settings.morningMusicEnabled,
-                ) { value ->
-                    onUpdate { it.copy(morningMusicEnabled = value) }
-                    if (value && !exactAlarmsAllowed) onRequestExactAlarmAccess()
-                }
-                SettingsDivider()
-                ToggleSettingRow("Питание", SystemLogic.formatTime(settings.dietTime), settings.dietEnabled) { value -> onUpdate { it.copy(dietEnabled = value) } }
-            }
-        }
-        item {
-            val admission = SystemLogic.admissionFor(LocalDate.now(), settings.admissionStart, records)
-            SettingsGroup("РЕЖИМ ДОПУСКА") {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                    Column {
-                        Text(if (admission.completed) "Стандарт активен" else "Уровень ${admission.level} из ${admission.totalLevels}", color = Paper, style = MaterialTheme.typography.titleLarge)
-                        Spacer(Modifier.height(4.dp))
-                        Text("10 → 12 → 14 → 16 → 18 → 20", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Text("${admission.target}", color = Acid, style = MaterialTheme.typography.displayMedium)
-                }
-                Spacer(Modifier.height(14.dp))
-                Text("Уровень повышается только после отметки «УТРО — ДА». После успешного 14-го уровня приложение закрепляет правило: 20 отжиманий подряд каждое утро.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-        item {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "Все отметки и настройки хранятся только на этом устройстве. Интернет используется для маршрута ВШЭ, а расписание читается из календаря Android только после разрешения.",
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                )
-                if (settings.hseModeEnabled) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        "Условия использования сервиса Яндекс Карты",
-                        color = Acid,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.clickable {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://yandex.ru/legal/maps_termsofuse")))
-                            }
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsGroup(label: String, content: @Composable ColumnScope.() -> Unit) {
-    Column {
-        Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp, modifier = Modifier.padding(start = 4.dp, bottom = 9.dp))
-        PremiumCard(content = content)
-    }
-}
-
-@Composable
-private fun TimeSettingRow(title: String, detail: String, value: LocalTime, onAdjust: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = Paper, style = MaterialTheme.typography.titleMedium)
-            Text(detail, color = Muted, style = MaterialTheme.typography.bodyMedium)
-        }
-        MiniButton("−", "Уменьшить время") { onAdjust(-5) }
-        Text(SystemLogic.formatTime(value), color = Acid, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center, modifier = Modifier.width(72.dp))
-        MiniButton("+", "Увеличить время") { onAdjust(5) }
-    }
-}
-
-@Composable
-private fun AddressSettingRow(
-    title: String,
-    detail: String,
-    value: String,
-    placeholder: String,
-    onValueChange: (String) -> Unit,
-) {
-    Column {
-        Text(title, color = Paper, style = MaterialTheme.typography.titleMedium)
-        Text(detail, color = Muted, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(10.dp))
-        BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Paper),
-            cursorBrush = SolidColor(Acid),
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(SurfaceSoft)
-                .padding(horizontal = 13.dp, vertical = 12.dp),
-            decorationBox = { inner ->
-                Box {
-                    if (value.isBlank()) Text(placeholder, color = Muted, style = MaterialTheme.typography.bodyLarge)
-                    inner()
-                }
-            },
-        )
-    }
-}
-
-@Composable
-private fun MiniButton(text: String, description: String, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .size(36.dp)
-            .clip(CircleShape)
-            .background(SurfaceSoft)
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = description },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text, color = Paper, fontSize = 20.sp)
-    }
-}
-
-@Composable
-private fun ToggleSettingRow(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = Paper, style = MaterialTheme.typography.titleMedium)
-            Text(detail, color = Muted, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onChecked,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Ink,
-                checkedTrackColor = Acid,
-                uncheckedThumbColor = Muted,
-                uncheckedTrackColor = SurfaceSoft,
-                uncheckedBorderColor = Hairline,
-            ),
-        )
-    }
-}
-
-@Composable
-private fun SettingsDivider() {
-    HorizontalDivider(color = Hairline, modifier = Modifier.padding(vertical = 15.dp))
 }
