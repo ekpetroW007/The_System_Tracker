@@ -5,22 +5,56 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
-import java.time.DayOfWeek
+import com.personal.thesystem.notifications.ReminderScheduler
 import com.personal.thesystem.notifications.ReminderType
+import com.personal.thesystem.notifications.CUTOFF_MUSIC_ARTIST
+import com.personal.thesystem.notifications.CUTOFF_MUSIC_TITLE
+import com.personal.thesystem.notifications.CUTOFF_MUSIC_VOLUME_PERCENT
+import com.personal.thesystem.notifications.mediaVolumeFor
+import com.personal.thesystem.notifications.yandexAutoPlayUrl
 
 class SystemLogicTest {
     private val start = LocalDate.of(2026, 8, 1)
 
     @Test
-    fun everyWeekdayHasTheRequestedMorningArtist() {
-        assertEquals("Big Baby Tape", SystemLogic.morningArtistFor(DayOfWeek.MONDAY))
-        assertEquals("Bushido Zho", SystemLogic.morningArtistFor(DayOfWeek.TUESDAY))
-        assertEquals("Icegergert", SystemLogic.morningArtistFor(DayOfWeek.WEDNESDAY))
-        assertEquals("Friendly Thug 52 NGG", SystemLogic.morningArtistFor(DayOfWeek.THURSDAY))
-        assertEquals("SQWOZ BAB", SystemLogic.morningArtistFor(DayOfWeek.FRIDAY))
-        assertEquals("Aarne", SystemLogic.morningArtistFor(DayOfWeek.SATURDAY))
-        assertEquals("kizaru", SystemLogic.morningArtistFor(DayOfWeek.SUNDAY))
+    fun digitalCutoffMusicRunsImmediatelyAndEveryFiveMinutes() {
+        assertEquals(
+            listOf(LocalTime.of(22, 45), LocalTime.of(22, 50), LocalTime.of(22, 55)),
+            ReminderScheduler.cutoffMusicTimes(LocalTime.of(22, 45)),
+        )
+        assertEquals(
+            listOf(LocalTime.of(23, 58), LocalTime.of(0, 3), LocalTime.of(0, 8)),
+            ReminderScheduler.cutoffMusicTimes(LocalTime.of(23, 58)),
+        )
+    }
+
+    @Test
+    fun weeklyReviewRunsEverySundayAtTen() {
+        assertEquals(
+            LocalDateTime.of(2026, 8, 30, 10, 0),
+            ReminderScheduler.nextWeeklyReviewAt(LocalDateTime.of(2026, 8, 30, 9, 59)),
+        )
+        assertEquals(
+            LocalDateTime.of(2026, 9, 6, 10, 0),
+            ReminderScheduler.nextWeeklyReviewAt(LocalDateTime.of(2026, 8, 30, 10, 0)),
+        )
+        assertEquals(
+            LocalDateTime.of(2026, 9, 6, 10, 0),
+            ReminderScheduler.nextWeeklyReviewAt(LocalDateTime.of(2026, 8, 31, 12, 0)),
+        )
+    }
+
+    @Test
+    fun cutoffMusicUsesFiftyPercentAndTheEmbeddedTrack() {
+        assertEquals(8, mediaVolumeFor(15, CUTOFF_MUSIC_VOLUME_PERCENT))
+        assertEquals("FRIENDLY THUG 52 NGG", CUTOFF_MUSIC_ARTIST)
+        assertEquals("Sladki Snov Rapper 2", CUTOFF_MUSIC_TITLE)
+        assertEquals(
+            "https://music.yandex.ru/playlists/example?utm_medium=copy&play=true",
+            yandexAutoPlayUrl("https://music.yandex.ru/playlists/example?utm_medium=copy"),
+        )
     }
 
     @Test
@@ -284,23 +318,6 @@ class SystemLogicTest {
     }
 
     @Test
-    fun weeklyReportSummarizesCurrentWeek() {
-        val monday = LocalDate.of(2026, 9, 7)
-        val records = listOf(
-            DailyRecord(monday, morning = DecisionStatus.YES, sleep = DecisionStatus.NO, sleepReason = ViolationReason.PHONE),
-            DailyRecord(monday.plusDays(1), morning = DecisionStatus.YES, sleep = DecisionStatus.YES),
-        )
-
-        val report = SystemLogic.weeklyReport(monday.plusDays(3), records)
-
-        assertEquals(monday, report.weekStart)
-        assertEquals(75, report.overall)
-        assertEquals("УТРО", report.strongest)
-        assertEquals("СОН", report.weakest)
-        assertEquals("Телефон · 1", report.topReason)
-    }
-
-    @Test
     fun hseModeCalculatesLeaveTimeAndReadableCountdown() {
         val settings = SystemSettings(
             hseFirstClassTime = LocalTime.of(10, 0),
@@ -315,24 +332,25 @@ class SystemLogicTest {
     }
 
     @Test
-    fun moneyUsesTwoFixedPeriodsPerMonth() {
+    fun moneyStartsAugustThirtiethThenUsesFixedHalfMonths() {
         assertEquals(
-            MoneyPeriod(LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 15)),
+            MoneyPeriod(LocalDate.of(2026, 8, 30), LocalDate.of(2026, 9, 15)),
             SystemLogic.moneyPeriodFor(LocalDate.of(2026, 8, 24)),
         )
         assertEquals(
-            MoneyPeriod(LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 15)),
+            MoneyPeriod(LocalDate.of(2026, 8, 30), LocalDate.of(2026, 9, 15)),
             SystemLogic.moneyPeriodFor(LocalDate.of(2026, 9, 15)),
         )
         assertEquals(
             MoneyPeriod(LocalDate.of(2026, 9, 16), LocalDate.of(2026, 9, 30)),
             SystemLogic.moneyPeriodFor(LocalDate.of(2026, 9, 16)),
         )
+        assertTrue(SystemLogic.previousMoneyPeriod(LocalDate.of(2026, 8, 30)).end.isBefore(SystemLogic.MONEY_START_DATE))
     }
 
     @Test
     fun moneySnapshotCarriesBalanceAndProtectsEachReserve() {
-        val firstPeriod = LocalDate.of(2026, 9, 1)
+        val firstPeriod = LocalDate.of(2026, 8, 30)
         val secondPeriod = LocalDate.of(2026, 9, 16)
         val transactions = listOf(
             MoneyTransaction(1, firstPeriod, 15_000, MoneyCategory.GROCERIES, true),
@@ -356,7 +374,7 @@ class SystemLogicTest {
 
     @Test
     fun mandatoryMoneyCommitmentsReduceTheSafeDailyBudget() {
-        val periodStart = LocalDate.of(2026, 9, 1)
+        val periodStart = LocalDate.of(2026, 8, 30)
         val snapshot = SystemLogic.moneySnapshot(
             date = periodStart,
             transactions = emptyList(),
@@ -373,7 +391,7 @@ class SystemLogicTest {
 
     @Test
     fun moneyWaitsForTheRealTransferAndBuildsAReadableReport() {
-        val periodStart = LocalDate.of(2026, 9, 1)
+        val periodStart = LocalDate.of(2026, 8, 30)
         val transactions = listOf(
             MoneyTransaction(1, periodStart, 1_000, MoneyCategory.GROCERIES, true),
             MoneyTransaction(2, periodStart.plusDays(1), 500, MoneyCategory.CAFE, false),

@@ -4,9 +4,6 @@
 
     <queries>
         <package android:name="ru.yandex.music" />
-        <intent>
-            <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
-        </intent>
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -14,6 +11,10 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
@@ -39,20 +40,23 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".notifications.MorningMusicActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:noHistory="true"
-            android:theme="@android:style/Theme.NoDisplay" />
-
         <receiver
             android:name=".notifications.ReminderReceiver"
             android:exported="false" />
 
         <receiver
-            android:name=".notifications.MorningMusicWatchdogReceiver"
+            android:name=".notifications.MusicAlarmReceiver"
             android:exported="false" />
+
+        <service
+            android:name=".notifications.MusicKickService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
+
+        <service
+            android:name=".notifications.CutoffMusicService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <receiver
             android:name=".notifications.RescheduleReceiver"
@@ -108,15 +112,6 @@
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/hse_widget_info" />
         </receiver>
 
-        <receiver
-            android:name=".widget.WeekWidgetProvider"
-            android:label="@string/widget_week_name"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/week_widget_info" />
-        </receiver>
     </application>
 
 </manifest>

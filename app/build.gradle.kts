@@ -38,8 +38,8 @@ android {
         applicationId = "com.personal.thesystem"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "2.0.0"
+        versionCode = 26
+        versionName = "2.0.10"
 
         buildConfigField("String", "MAPKIT_API_KEY", "\"${mapkitApiKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 
@@ -58,6 +58,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -126,8 +134,6 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.material3:material3")
-
-    debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
 }

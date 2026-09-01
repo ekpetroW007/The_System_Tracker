@@ -141,9 +141,7 @@ import com.personal.thesystem.model.StudyAssignment
 import com.personal.thesystem.model.SleepViolationPart
 import com.personal.thesystem.model.ViolationReason
 import com.personal.thesystem.model.WeeklyExperiment
-import com.personal.thesystem.model.WeeklyReport
 import com.personal.thesystem.notifications.ReminderScheduler
-import com.personal.thesystem.notifications.MorningMusicActivity
 import com.personal.thesystem.notifications.ReminderReceiver
 import com.personal.thesystem.ui.theme.Acid
 import com.personal.thesystem.ui.theme.AcidDim
@@ -215,7 +213,7 @@ internal fun MoneyScreen(repository: SystemRepository) {
         if (today.isBefore(SystemLogic.MONEY_START_DATE)) {
             item {
                 PremiumCard(color = Acid.copy(alpha = .07f), border = Acid.copy(alpha = .30f)) {
-                    Text("СТАРТ 1 СЕНТЯБРЯ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
+                    Text("СТАРТ 30 АВГУСТА", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
                     Spacer(Modifier.height(12.dp))
                     Text("${formatMoney(repository.settings.moneyTransferRubles)} на полмесяца", color = Paper, style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(7.dp))
@@ -700,4 +698,3 @@ private fun dayWord(value: Long): String = when {
     value % 10 in 2L..4L -> "дня"
     else -> "дней"
 }
-

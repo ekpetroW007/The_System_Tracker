@@ -10,11 +10,12 @@ import java.time.LocalTime
 
 class BusRouteFilterTest {
     @Test
-    fun acceptsOnlyBusVehicleType() {
-        assertTrue(isBusLine(listOf("express_bus", "bus")))
-        assertFalse(isBusLine(listOf("minibus")))
-        assertFalse(isBusLine(listOf("trolleybus")))
-        assertFalse(isBusLine(listOf("underground")))
+    fun acceptsOnlyDaytimeBusVehicleType() {
+        assertTrue(isDayBusLine(listOf("express_bus", "bus"), isNight = false))
+        assertFalse(isDayBusLine(listOf("bus"), isNight = true))
+        assertFalse(isDayBusLine(listOf("minibus"), isNight = false))
+        assertFalse(isDayBusLine(listOf("trolleybus"), isNight = false))
+        assertFalse(isDayBusLine(listOf("underground"), isNight = false))
         assertTrue(isDirectBusRoute(busSections = 1, transfers = 0))
         assertFalse(isDirectBusRoute(busSections = 2, transfers = 1))
     }
@@ -50,15 +51,16 @@ class BusRouteFilterTest {
     }
 
     @Test
-    fun advancesExpiredMorningPlanAndBuildsForClassArrival() {
+    fun switchesPlanAtElevenAndTargetsNineWithoutEvents() {
         val today = LocalDate.of(2026, 9, 1)
 
-        assertEquals(today, plannedMorningDate(today, LocalTime.of(7, 0), null))
+        assertEquals(today, plannedMorningDate(today, LocalTime.of(10, 59), null))
+        assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(11, 0), null))
         assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(20, 0), null))
         assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(20, 0), today))
         assertEquals(today.plusDays(1), plannedMorningDate(today, LocalTime.of(7, 0), today.plusDays(1)))
         assertEquals(
-            Instant.parse("2026-09-01T05:20:00Z").toEpochMilli(),
+            Instant.parse("2026-09-01T06:00:00Z").toEpochMilli(),
             routeArrivalEpochMillis(today, HSE_ROUTE_TIME),
         )
     }

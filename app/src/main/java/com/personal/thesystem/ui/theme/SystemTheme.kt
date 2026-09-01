@@ -22,6 +22,7 @@ val Muted = Color(0xFF949A9F)
 val Hairline = Color(0xFF2A2E34)
 val Danger = Color(0xFFFF7468)
 val Amber = Color(0xFFB2B6BA)
+val HseGold = Color(0xFF9DE5F3)
 
 private val SystemColors = darkColorScheme(
     primary = Acid,

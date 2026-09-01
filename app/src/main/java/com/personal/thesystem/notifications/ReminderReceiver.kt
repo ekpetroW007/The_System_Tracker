@@ -22,6 +22,7 @@ class ReminderReceiver : BroadcastReceiver() {
         } ?: return
 
         val repository = SystemRepository(context)
+        if (type == ReminderType.WEEKLY_REVIEW) repository.markWeeklyReviewDue(LocalDate.now())
         if (!type.shouldNotify(repository.recordFor(LocalDate.now()))) {
             ReminderScheduler.scheduleNext(context, type, repository.settings)
             return
@@ -30,7 +31,7 @@ class ReminderReceiver : BroadcastReceiver() {
         ReminderScheduler.createChannel(context)
         val openApp = PendingIntent.getActivity(
             context,
-            500,
+            500 + type.requestCode,
             Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(MainActivity.EXTRA_DESTINATION, type.destination)

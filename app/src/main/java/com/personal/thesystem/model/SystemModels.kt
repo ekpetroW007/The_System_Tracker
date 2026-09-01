@@ -72,7 +72,6 @@ data class SystemSettings(
     val preparationEnabled: Boolean = true,
     val bedEnabled: Boolean = true,
     val morningEnabled: Boolean = true,
-    val morningMusicEnabled: Boolean = false,
     val dietEnabled: Boolean = true,
     val reduceMotion: Boolean = false,
     val admissionStart: LocalDate = LocalDate.now(),
@@ -100,6 +99,14 @@ data class StudyAssignment(
     val dueDate: LocalDate,
     val priority: AssignmentPriority = AssignmentPriority.NORMAL,
     val completed: Boolean = false,
+)
+
+data class WeeklyReview(
+    val date: LocalDate,
+    val nextWeekDeadlines: String = "",
+    val tests: String = "",
+    val weakestSubject: String = "",
+    val startEarly: String = "",
 )
 
 enum class MoneyCategory(val id: String, val label: String) {
@@ -271,26 +278,6 @@ data class CorrelationAnalysis(
 
 data class ComplianceStat(val value: Int?, val answered: Int, val eligible: Int)
 
-data class WeeklyMetric(
-    val label: String,
-    val value: Int?,
-    val answered: Int = 0,
-    val eligible: Int = 0,
-)
-
-data class WeeklyReport(
-    val weekStart: LocalDate,
-    val weekEnd: LocalDate,
-    val overall: Int?,
-    val metrics: List<WeeklyMetric>,
-    val strongest: String?,
-    val weakest: String?,
-    val topReason: String?,
-    val insight: String?,
-    val experiment: WeeklyExperiment,
-    val experimentFeedback: ExperimentFeedback?,
-)
-
 object SystemLogic {
     const val ADMISSION_LEVELS = 14
     const val LIGHT_PLAN_DAYS = 30
@@ -299,26 +286,24 @@ object SystemLogic {
     const val WATER_MAX_QUARTERS = 20
     const val MONEY_TRANSFER_RUBLES = 20_000L
     const val MONEY_RESERVE_PER_TRANSFER_RUBLES = 2_000L
-    val MONEY_START_DATE: LocalDate = LocalDate.of(2026, 9, 1)
-
-    fun morningArtistFor(dayOfWeek: DayOfWeek): String = when (dayOfWeek) {
-        DayOfWeek.MONDAY -> "Big Baby Tape"
-        DayOfWeek.TUESDAY -> "Bushido Zho"
-        DayOfWeek.WEDNESDAY -> "Icegergert"
-        DayOfWeek.THURSDAY -> "Friendly Thug 52 NGG"
-        DayOfWeek.FRIDAY -> "SQWOZ BAB"
-        DayOfWeek.SATURDAY -> "Aarne"
-        DayOfWeek.SUNDAY -> "kizaru"
-    }
+    val MONEY_START_DATE: LocalDate = LocalDate.of(2026, 8, 30)
+    private val MONEY_FIRST_PERIOD_END: LocalDate = LocalDate.of(2026, 9, 15)
 
     fun moneyPeriodFor(date: LocalDate): MoneyPeriod {
-        if (date.isBefore(MONEY_START_DATE)) return MoneyPeriod(MONEY_START_DATE, MONEY_START_DATE.plusDays(14))
+        if (!date.isAfter(MONEY_FIRST_PERIOD_END)) return MoneyPeriod(MONEY_START_DATE, MONEY_FIRST_PERIOD_END)
         val start = if (date.dayOfMonth <= 15) date.withDayOfMonth(1) else date.withDayOfMonth(16)
         val end = if (start.dayOfMonth == 1) start.withDayOfMonth(15) else start.withDayOfMonth(start.lengthOfMonth())
         return MoneyPeriod(start, end)
     }
 
-    fun previousMoneyPeriod(date: LocalDate): MoneyPeriod = moneyPeriodFor(moneyPeriodFor(date).start.minusDays(1))
+    fun previousMoneyPeriod(date: LocalDate): MoneyPeriod {
+        val current = moneyPeriodFor(date)
+        return if (current.start == MONEY_START_DATE) {
+            MoneyPeriod(MONEY_START_DATE.minusDays(14), MONEY_START_DATE.minusDays(1))
+        } else {
+            moneyPeriodFor(current.start.minusDays(1))
+        }
+    }
 
     fun moneySnapshot(
         date: LocalDate,
@@ -668,49 +653,6 @@ object SystemLogic {
             insights = insights,
             comparableDays = maxOf(sleepToMorning.size, lightToSleep.size, waterToDiet.size, sleepToDiet.size),
             requiredDays = MIN_CORRELATION_DAYS,
-        )
-    }
-
-    fun weeklyReport(
-        date: LocalDate,
-        records: Collection<DailyRecord>,
-        feedback: Map<LocalDate, ExperimentFeedback> = emptyMap(),
-    ): WeeklyReport {
-        val weekStart = date.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-        val weekEnd = weekStart.plusDays(6)
-        val weekRecords = records.filter { !it.date.isBefore(weekStart) && !it.date.isAfter(weekEnd) }
-        val eligibleDays = (ChronoUnit.DAYS.between(weekStart, minOf(date, weekEnd)) + 1L).toInt().coerceAtLeast(0)
-        fun metric(label: String, selector: (DailyRecord) -> DecisionStatus?): WeeklyMetric {
-            val stat = complianceStat(weekRecords, eligibleDays, selector)
-            return WeeklyMetric(label, stat.value, stat.answered, stat.eligible)
-        }
-        val metrics = listOf(
-            metric("УТРО") { it.morning },
-            metric("СВЕТ") { it.light },
-            metric("ПИТАНИЕ") { it.diet },
-            metric("ВОДА") { it.water },
-            metric("СОН") { it.sleep },
-        )
-        val allDecisions = weekRecords.flatMap { listOfNotNull(it.morning, it.light, it.diet, it.water, it.sleep) }
-        val measured = metrics.filter { it.value != null }
-        val reasons = buildList {
-            weekRecords.filter { it.sleep == DecisionStatus.NO }.mapNotNullTo(this) { it.sleepReason?.label }
-            weekRecords.filter { it.diet == DecisionStatus.NO }.mapNotNullTo(this) { it.dietReason?.label }
-        }
-        val topReason = reasons.groupingBy { it }.eachCount().maxByOrNull { it.value }?.let { (label, count) -> "$label · $count" }
-        val strongestInsight = correlationAnalysis(records).insights.maxByOrNull { kotlin.math.abs(it.yesRate - it.noRate) }
-        val experiment = weeklyExperiment(date, records, feedback)
-        return WeeklyReport(
-            weekStart = weekStart,
-            weekEnd = weekEnd,
-            overall = allDecisions.takeIf { it.isNotEmpty() }?.let { decisions -> decisions.count { it == DecisionStatus.YES } * 100 / decisions.size },
-            metrics = metrics,
-            strongest = measured.maxByOrNull { it.value ?: -1 }?.label,
-            weakest = measured.minByOrNull { it.value ?: 101 }?.label,
-            topReason = topReason,
-            insight = strongestInsight?.let { "${it.title}: ${it.yesRate}% против ${it.noRate}%" },
-            experiment = experiment,
-            experimentFeedback = feedback[weekStart],
         )
     }
 

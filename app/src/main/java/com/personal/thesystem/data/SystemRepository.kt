@@ -17,6 +17,7 @@ import com.personal.thesystem.model.AssignmentPriority
 import com.personal.thesystem.model.StudyAssignment
 import com.personal.thesystem.model.ViolationReason
 import com.personal.thesystem.model.SleepViolationPart
+import com.personal.thesystem.model.WeeklyReview
 import com.personal.thesystem.widget.SystemWidgetProvider
 import com.personal.thesystem.notifications.ReminderScheduler
 import org.json.JSONArray
@@ -57,6 +58,15 @@ class SystemRepository(context: Context) {
     var moneyCommitments by mutableStateOf(database.loadMoneyCommitments())
         private set
 
+    var weeklyReview by mutableStateOf(loadWeeklyReview(KEY_WEEKLY_REVIEW))
+        private set
+
+    var weeklyReviewDraft by mutableStateOf(loadWeeklyReview(KEY_WEEKLY_REVIEW_DRAFT))
+        private set
+
+    var weeklyReviewDueDate by mutableStateOf(preferenceDate(KEY_WEEKLY_REVIEW_DUE))
+        private set
+
     fun recordFor(date: LocalDate): DailyRecord = records[date] ?: DailyRecord(date)
 
     fun shouldShowPreviousDayReminder(today: LocalDate): Boolean =
@@ -72,6 +82,43 @@ class SystemRepository(context: Context) {
 
     fun markPreviousDayReminderShown(today: LocalDate) {
         preferences.edit().putString(KEY_PREVIOUS_DAY_REMINDER, today.toString()).apply()
+    }
+
+    fun markWeeklyReviewDue(date: LocalDate) {
+        if (weeklyReviewDueDate == date && weeklyReviewDraft != null) return
+        weeklyReviewDueDate = date
+        weeklyReviewDraft = WeeklyReview(date)
+        preferences.edit()
+            .putString(KEY_WEEKLY_REVIEW_DUE, date.toString())
+            .putString(KEY_WEEKLY_REVIEW_DRAFT, weeklyReviewToJson(weeklyReviewDraft!!).toString())
+            .commit()
+    }
+
+    fun updateWeeklyReview(transform: (WeeklyReview) -> WeeklyReview) {
+        val dueDate = weeklyReviewDueDate
+        if (dueDate != null) {
+            weeklyReviewDraft = transform(weeklyReviewDraft ?: WeeklyReview(dueDate))
+            preferences.edit()
+                .putString(KEY_WEEKLY_REVIEW_DRAFT, weeklyReviewToJson(weeklyReviewDraft!!).toString())
+                .apply()
+        } else {
+            weeklyReview = transform(weeklyReview ?: WeeklyReview(LocalDate.now()))
+            preferences.edit()
+                .putString(KEY_WEEKLY_REVIEW, weeklyReviewToJson(weeklyReview!!).toString())
+                .apply()
+        }
+    }
+
+    fun completeWeeklyReview() {
+        val completed = weeklyReviewDraft ?: return
+        weeklyReview = completed
+        weeklyReviewDraft = null
+        weeklyReviewDueDate = null
+        preferences.edit()
+            .putString(KEY_WEEKLY_REVIEW, weeklyReviewToJson(completed).toString())
+            .remove(KEY_WEEKLY_REVIEW_DRAFT)
+            .remove(KEY_WEEKLY_REVIEW_DUE)
+            .apply()
     }
 
     fun setSleep(
@@ -228,6 +275,9 @@ class SystemRepository(context: Context) {
         moneyTransactions = database.loadMoneyTransactions()
         moneyReceivedPeriods = database.loadMoneyTransfers()
         moneyCommitments = database.loadMoneyCommitments()
+        weeklyReview = loadWeeklyReview(KEY_WEEKLY_REVIEW)
+        weeklyReviewDraft = loadWeeklyReview(KEY_WEEKLY_REVIEW_DRAFT)
+        weeklyReviewDueDate = preferenceDate(KEY_WEEKLY_REVIEW_DUE)
     }
 
     fun addAssignment(title: String, subject: String, dueDate: LocalDate, priority: AssignmentPriority) {
@@ -282,7 +332,6 @@ class SystemRepository(context: Context) {
             .putBoolean(KEY_PREPARATION, settings.preparationEnabled)
             .putBoolean(KEY_BED_ENABLED, settings.bedEnabled)
             .putBoolean(KEY_MORNING_ENABLED, settings.morningEnabled)
-            .putBoolean(KEY_MORNING_MUSIC_ENABLED, settings.morningMusicEnabled)
             .putBoolean(KEY_DIET_ENABLED, settings.dietEnabled)
             .putBoolean(KEY_REDUCE_MOTION, settings.reduceMotion)
             .putString(KEY_ADMISSION_START, settings.admissionStart.toString())
@@ -477,6 +526,29 @@ class SystemRepository(context: Context) {
             }.getOrNull()
         }
 
+    private fun loadWeeklyReview(key: String): WeeklyReview? = preferences
+        .getString(key, null)
+        ?.let { value ->
+            runCatching {
+                val json = JSONObject(value)
+                WeeklyReview(
+                    date = LocalDate.parse(json.getString("date")),
+                    nextWeekDeadlines = json.optString("nextWeekDeadlines"),
+                    tests = json.optString("tests"),
+                    weakestSubject = json.optString("weakestSubject"),
+                    startEarly = json.optString("startEarly"),
+                )
+            }.getOrNull()
+        }
+
+    private fun weeklyReviewToJson(review: WeeklyReview): JSONObject = JSONObject().apply {
+        put("date", review.date.toString())
+        put("nextWeekDeadlines", review.nextWeekDeadlines)
+        put("tests", review.tests)
+        put("weakestSubject", review.weakestSubject)
+        put("startEarly", review.startEarly)
+    }
+
     private fun loadSettings(): SystemSettings = SystemSettings(
         digitalCutoff = preferenceTime(KEY_CUTOFF, LocalTime.of(22, 45)),
         bedTime = preferenceTime(KEY_BED, LocalTime.of(23, 30)),
@@ -488,7 +560,6 @@ class SystemRepository(context: Context) {
         preparationEnabled = preferences.getBoolean(KEY_PREPARATION, true),
         bedEnabled = preferences.getBoolean(KEY_BED_ENABLED, true),
         morningEnabled = preferences.getBoolean(KEY_MORNING_ENABLED, true),
-        morningMusicEnabled = preferences.getBoolean(KEY_MORNING_MUSIC_ENABLED, false),
         dietEnabled = preferences.getBoolean(KEY_DIET_ENABLED, true),
         reduceMotion = preferences.getBoolean(KEY_REDUCE_MOTION, false),
         admissionStart = preferenceDate(KEY_ADMISSION_START) ?: LocalDate.now().also {
@@ -676,7 +747,6 @@ class SystemRepository(context: Context) {
         put("bedEnabled", value.bedEnabled)
         put("morningEnabled", value.morningEnabled)
         put("dietEnabled", value.dietEnabled)
-        put("morningMusicEnabled", value.morningMusicEnabled)
         put("reduceMotion", value.reduceMotion)
         put("admissionStart", value.admissionStart.toString())
         put("lightStart", value.lightStart.toString())
@@ -703,7 +773,6 @@ class SystemRepository(context: Context) {
         bedEnabled = json.optBoolean("bedEnabled", fallback.bedEnabled),
         morningEnabled = json.optBoolean("morningEnabled", fallback.morningEnabled),
         dietEnabled = json.optBoolean("dietEnabled", fallback.dietEnabled),
-        morningMusicEnabled = json.optBoolean("morningMusicEnabled", fallback.morningMusicEnabled),
         reduceMotion = json.optBoolean("reduceMotion", fallback.reduceMotion),
         admissionStart = json.safeDate("admissionStart", fallback.admissionStart),
         lightStart = json.safeDate("lightStart", fallback.lightStart),
@@ -746,7 +815,6 @@ class SystemRepository(context: Context) {
         private const val KEY_PREPARATION = "preparation_enabled"
         private const val KEY_BED_ENABLED = "bed_enabled"
         private const val KEY_MORNING_ENABLED = "morning_enabled"
-        private const val KEY_MORNING_MUSIC_ENABLED = "morning_music_enabled"
         private const val KEY_DIET_ENABLED = "diet_enabled"
         private const val KEY_REDUCE_MOTION = "reduce_motion"
         private const val KEY_ADMISSION_START = "admission_start"
@@ -762,6 +830,9 @@ class SystemRepository(context: Context) {
         private const val KEY_MONEY_RESERVE_AMOUNT = "money_reserve_amount"
         private const val KEY_HSE_TRANSIT_PLAN = "hse_transit_plan"
         private const val KEY_PREVIOUS_DAY_REMINDER = "previous_day_reminder"
+        private const val KEY_WEEKLY_REVIEW = "weekly_review"
+        private const val KEY_WEEKLY_REVIEW_DRAFT = "weekly_review_draft"
+        private const val KEY_WEEKLY_REVIEW_DUE = "weekly_review_due"
         private const val KEY_DATABASE_MIGRATED = "database_migrated_v1"
         private const val KEY_LAST_ID = "last_generated_id"
         private const val EXPORT_SCHEMA = 2

@@ -51,7 +51,8 @@ data class HseTransitPlan(
     val generatedAtEpochMillis: Long = System.currentTimeMillis(),
 )
 
-internal fun isBusLine(vehicleTypes: List<String>): Boolean = "bus" in vehicleTypes
+internal fun isDayBusLine(vehicleTypes: List<String>, isNight: Boolean): Boolean =
+    "bus" in vehicleTypes && !isNight
 
 internal fun isDirectBusRoute(busSections: Int, transfers: Int): Boolean =
     busSections == 1 && transfers == 0
@@ -96,13 +97,13 @@ internal fun plannedMorningDate(
     cachedDate: LocalDate?,
 ): LocalDate = when {
     cachedDate != null && cachedDate.isAfter(today) -> cachedDate
-    cachedDate == today && now.isBefore(HSE_ROUTE_TIME) -> cachedDate
-    now.isBefore(HSE_ROUTE_TIME) -> today
+    cachedDate == today && now.isBefore(HSE_ROUTE_DAY_SWITCH_TIME) -> cachedDate
+    now.isBefore(HSE_ROUTE_DAY_SWITCH_TIME) -> today
     else -> today.plusDays(1)
 }
 
-internal fun routeArrivalEpochMillis(date: LocalDate, classTime: LocalTime): Long = date
-    .atTime(classTime.minusMinutes(10))
+internal fun routeArrivalEpochMillis(date: LocalDate, arrivalTime: LocalTime): Long = date
+    .atTime(arrivalTime)
     .atZone(MOSCOW_ZONE)
     .toInstant()
     .toEpochMilli()
@@ -250,7 +251,9 @@ class YandexTransitController {
             .filter { it.value.metadata.data.transports != null }
         val rideSections = indexedRideSections.map { it.value }
         val busTransportsBySection = rideSections.map { section ->
-            section.metadata.data.transports.orEmpty().filter { isBusLine(it.line.vehicleTypes) }
+            section.metadata.data.transports.orEmpty().filter {
+                isDayBusLine(it.line.vehicleTypes, it.line.isNight)
+            }
         }
         if (busTransportsBySection.isEmpty() || busTransportsBySection.any { it.isEmpty() }) return null
         if (!isDirectBusRoute(rideSections.size, route.metadata.weight.transfersCount)) return null
@@ -306,7 +309,7 @@ class YandexTransitController {
             busArrivalTime = busArrivalTime,
             walkToStopMeters = walkToStopMeters,
             walkToUniversityMeters = walkToUniversityMeters,
-            leaveHomeTime = targetTime.minusMinutes(totalMinutes.toLong() + 10L).toString(),
+            leaveHomeTime = targetTime.minusMinutes(totalMinutes.toLong()).toString(),
         )
     }
 
@@ -321,6 +324,7 @@ class YandexTransitController {
     }
 }
 
-internal val HSE_ROUTE_TIME: LocalTime = LocalTime.of(8, 30)
+internal val HSE_ROUTE_TIME: LocalTime = LocalTime.of(9, 0)
+private val HSE_ROUTE_DAY_SWITCH_TIME: LocalTime = LocalTime.of(11, 0)
 private val MOSCOW_ZONE = ZoneId.of("Europe/Moscow")
 private const val WALKING_METERS_PER_MINUTE = 4_000.0 / 60.0

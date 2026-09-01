@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -142,15 +143,14 @@ import com.personal.thesystem.model.StudyAssignment
 import com.personal.thesystem.model.SleepViolationPart
 import com.personal.thesystem.model.ViolationReason
 import com.personal.thesystem.model.WeeklyExperiment
-import com.personal.thesystem.model.WeeklyReport
 import com.personal.thesystem.notifications.ReminderScheduler
-import com.personal.thesystem.notifications.MorningMusicActivity
 import com.personal.thesystem.notifications.ReminderReceiver
 import com.personal.thesystem.ui.theme.Acid
 import com.personal.thesystem.ui.theme.AcidDim
 import com.personal.thesystem.ui.theme.Amber
 import com.personal.thesystem.ui.theme.Danger
 import com.personal.thesystem.ui.theme.Hairline
+import com.personal.thesystem.ui.theme.HseGold
 import com.personal.thesystem.ui.theme.Ink
 import com.personal.thesystem.ui.theme.Muted
 import com.personal.thesystem.ui.theme.MorningInk
@@ -246,6 +246,12 @@ fun SystemApp(
     var selectedTab by rememberSaveable { mutableStateOf(AppTab.TODAY) }
     var showPersonalSystem by rememberSaveable { mutableStateOf(false) }
     var showDisciplineHistory by rememberSaveable { mutableStateOf(false) }
+    var showWeeklyReview by rememberSaveable {
+        mutableStateOf(repository.weeklyReviewDueDate != null || initialDestination == "weekly_review")
+    }
+    var showRunPrompt by rememberSaveable { mutableStateOf(false) }
+    var runStartedAtRealtime by rememberSaveable { mutableStateOf<Long?>(null) }
+    var runSummarySeconds by rememberSaveable { mutableStateOf<Long?>(null) }
     var pendingReason by remember { mutableStateOf<Pair<LocalDate, DecisionKind>?>(null) }
     var emojiAfterReason by remember { mutableStateOf(false) }
     var confettiBurst by remember { mutableIntStateOf(0) }
@@ -265,18 +271,14 @@ fun SystemApp(
     }
     val modeTransitionProgress = remember { Animatable(1f) }
     var modeTransitionTarget by remember { mutableStateOf<Boolean?>(null) }
-    var openWeeklyReport by remember { mutableStateOf(false) }
 
     LaunchedEffect(initialDestination) {
         when (initialDestination) {
             "history" -> selectedTab = AppTab.HISTORY
             "money" -> selectedTab = AppTab.MONEY
             "stats" -> selectedTab = AppTab.STATS
-            "week" -> {
-                selectedTab = AppTab.STATS
-                openWeeklyReport = true
-            }
             "settings" -> selectedTab = AppTab.SETTINGS
+            "weekly_review" -> showWeeklyReview = true
             "hse" -> {
                 if (!repository.settings.hseModeEnabled) repository.updateSettings { it.copy(hseModeEnabled = true) }
                 selectedTab = AppTab.TODAY
@@ -288,6 +290,10 @@ fun SystemApp(
             }
         }
         if (initialDestination != null) onDestinationHandled()
+    }
+
+    LaunchedEffect(repository.weeklyReviewDueDate) {
+        if (repository.weeklyReviewDueDate != null) showWeeklyReview = true
     }
 
     LaunchedEffect(Unit) {
@@ -304,7 +310,7 @@ fun SystemApp(
     val hseMode = repository.settings.hseModeEnabled
     val targetBackground = when {
         !currentTime.isBefore(repository.settings.digitalCutoff) -> NightInk
-        hseMode -> Color(0xFF08121C)
+        hseMode -> Color(0xFF050506)
         currentTime.hour < 12 -> MorningInk
         else -> Ink
     }
@@ -368,6 +374,44 @@ fun SystemApp(
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         if (needsPermission) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         else activateNotifications(true)
+    }
+
+    if (showWeeklyReview) {
+        WeeklyReviewScreen(repository) {
+            repository.completeWeeklyReview()
+            showWeeklyReview = false
+        }
+        return
+    }
+
+    RunShakeEffect(
+        enabled = runStartedAtRealtime == null &&
+            runSummarySeconds == null &&
+            !showRunPrompt &&
+            pendingReason == null &&
+            !showPreviousDayReminder &&
+            modeTransitionTarget == null,
+        onShake = { showRunPrompt = true },
+    )
+
+    runStartedAtRealtime?.let { startedAt ->
+        RunningScreen(
+            startedAtRealtime = startedAt,
+            motionAllowed = motionAllowed,
+            onFinish = { elapsedSeconds ->
+                runStartedAtRealtime = null
+                runSummarySeconds = elapsedSeconds
+            },
+        )
+        return
+    }
+    runSummarySeconds?.let { elapsedSeconds ->
+        RunSummaryScreen(
+            elapsedSeconds = elapsedSeconds,
+            motionAllowed = motionAllowed,
+            onDone = { runSummarySeconds = null },
+        )
+        return
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -481,13 +525,10 @@ fun SystemApp(
                         repository = repository,
                         hseMode = hseMode,
                         onOpenHistory = { showDisciplineHistory = true },
-                        openWeeklyReport = openWeeklyReport,
-                        onWeeklyReportOpened = { openWeeklyReport = false },
+                        onOpenWeeklyReview = { showWeeklyReview = true },
                     )
                     AppTab.SETTINGS -> SettingsScreen(
-                        repository = repository,
                         settings = repository.settings,
-                        records = repository.records.values,
                         onUpdate = ::applySettings,
                         onEnableNotifications = ::enableNotifications,
                         onRequestExactAlarmAccess = ::requestExactAlarmAccess,
@@ -509,12 +550,7 @@ fun SystemApp(
                 onYes = { task ->
                     val kind = when (task) {
                         DailyTask.MORNING -> {
-                            val target = SystemLogic.admissionFor(
-                                previousDate,
-                                repository.settings.admissionStart,
-                                repository.records.values,
-                            ).target
-                            repository.setMorningRepetitions(previousDate, target, target)
+                            repository.setMorning(previousDate, DecisionStatus.YES)
                             DecisionKind.MORNING
                         }
                         DailyTask.LIGHT -> { repository.setLight(previousDate, DecisionStatus.YES); DecisionKind.LIGHT }
@@ -580,6 +616,17 @@ fun SystemApp(
                     }
                 }
             }
+        )
+    }
+    if (showRunPrompt) {
+        RunPromptSheet(
+            onYes = {
+                showRunPrompt = false
+                runSummarySeconds = null
+                runStartedAtRealtime = SystemClock.elapsedRealtime()
+                launchRunPlaylist(context)
+            },
+            onNo = { showRunPrompt = false },
         )
     }
 }
@@ -1011,7 +1058,6 @@ private fun TodayScreen(
     val record = repository.recordFor(today)
     val settings = repository.settings
     var expandedCompleted by remember(today) { mutableStateOf(emptySet<DailyTask>()) }
-    val admission = SystemLogic.admissionFor(today, settings.admissionStart, repository.records.values)
     val lightPlan = SystemLogic.lightPlanFor(today, settings.lightStart)
     val activeTasks = SystemLogic.activeTasks(today, settings)
     val experiment = if (SystemLogic.experimentAvailableOn(today)) {
@@ -1043,19 +1089,14 @@ private fun TodayScreen(
                         ScreenHeader("Личная система", "Сегодня")
                     }
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    SystemMark(answered, activeTasks.size)
-                    Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
                     ModeToggleButton(settings.hseModeEnabled, onToggleHseMode)
+                    SystemMark(answered, activeTasks.size)
                 }
             }
         }
 
         item { DailyStatement(answered, activeTasks.size, record) }
-
-        currentTask?.let { task ->
-            item { CurrentTaskCard(task) }
-        }
 
         recoveryTask?.let { task ->
             item { RecoveryCard(task) }
@@ -1076,19 +1117,23 @@ private fun TodayScreen(
         }
 
         item {
-            SectionLabel("УТРО", if (admission.completed) "РЕЖИМ 20" else "УРОВЕНЬ ${admission.level}/${admission.totalLevels}")
+            SectionLabel("УТРО", "20 ОТЖИМАНИЙ")
             Spacer(Modifier.height(8.dp))
             DecisionCard(
                 title = "УТРО",
                 number = "01",
-                description = if (admission.completed) {
-                    "Сразу после пробуждения — 20 отжиманий."
-                } else {
-                    "Сразу после пробуждения — ${admission.target} ${pushupWord(admission.target)}."
-                },
+                description = "Сразу после пробуждения — 20 отжиманий.",
                 status = record.morning,
                 reasonLabel = record.morningReason?.label,
-                onYes = {},
+                onYes = {
+                    if (SystemLogic.toggledDecision(record.morning, DecisionStatus.YES) == null) {
+                        repository.clearMorning(today)
+                    } else {
+                        repository.setMorning(today, DecisionStatus.YES)
+                        expandedCompleted -= DailyTask.MORNING
+                        onCelebrate(DecisionKind.MORNING)
+                    }
+                },
                 onNo = {
                     if (SystemLogic.toggledDecision(record.morning, DecisionStatus.NO) == null) repository.clearMorning(today)
                     else onNo(DecisionKind.MORNING)
@@ -1096,25 +1141,6 @@ private fun TodayScreen(
                 collapsed = record.morning != null && DailyTask.MORNING !in expandedCompleted,
                 current = currentTask == DailyTask.MORNING,
                 onToggleCollapsed = { toggleCompleted(DailyTask.MORNING) },
-                showDecisionButtons = false,
-                footer = {
-                    PushupCounter(
-                        repetitions = record.morningRepetitions ?: if (record.morning == DecisionStatus.YES) admission.target else 0,
-                        target = admission.target,
-                        onChange = { repetitions ->
-                            if (repository.setMorningRepetitions(today, repetitions, admission.target)) {
-                                expandedCompleted -= DailyTask.MORNING
-                                onCelebrate(DecisionKind.MORNING)
-                            }
-                        },
-                        onNo = {
-                            if (record.morning == DecisionStatus.NO) repository.clearMorning(today)
-                            else onNo(DecisionKind.MORNING)
-                        },
-                    )
-                    Spacer(Modifier.height(18.dp))
-                    AdmissionProgress(admission.target, admission.level, admission.totalLevels, admission.completed)
-                },
             )
         }
 
@@ -1382,20 +1408,6 @@ private fun DailyStatement(answered: Int, total: Int, record: DailyRecord) {
 }
 
 @Composable
-private fun CurrentTaskCard(task: DailyTask) {
-    PremiumCard(
-        color = Acid.copy(alpha = .065f),
-        border = Acid.copy(alpha = .72f),
-    ) {
-        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
-        Spacer(Modifier.height(8.dp))
-        Text(task.title, color = Paper, style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(5.dp))
-        Text(task.recoveryAction, color = Muted, style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-@Composable
 private fun RecoveryCard(task: DailyTask) {
     PremiumCard(color = SurfaceSoft, border = Acid.copy(alpha = .28f)) {
         Text("РЕЖИМ ВОССТАНОВЛЕНИЯ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
@@ -1540,13 +1552,7 @@ private fun DecisionCard(
         ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(number, color = if (status == null) Muted else Acid, style = MaterialTheme.typography.labelMedium)
-                    if (current && status == null) {
-                        Spacer(Modifier.width(9.dp))
-                        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.2.sp)
-                    }
-                }
+                Text(number, color = if (status == null) Muted else Acid, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(12.dp))
                 Text(title, color = Paper, style = MaterialTheme.typography.headlineMedium, letterSpacing = 1.sp)
                 Spacer(Modifier.height(7.dp))
@@ -1636,13 +1642,7 @@ private fun WaterCard(
         ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("04", color = if (quarters == 0) Muted else Acid, style = MaterialTheme.typography.labelMedium)
-                    if (current && !completed) {
-                        Spacer(Modifier.width(9.dp))
-                        Text("СЕЙЧАС", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.2.sp)
-                    }
-                }
+                Text("04", color = if (quarters == 0) Muted else Acid, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(12.dp))
                 Text("Watering", color = Paper, style = MaterialTheme.typography.headlineMedium, letterSpacing = 1.sp)
                 Spacer(Modifier.height(7.dp))
@@ -1749,67 +1749,6 @@ private fun DecisionButton(
 }
 
 @Composable
-private fun PushupCounter(
-    repetitions: Int,
-    target: Int,
-    onChange: (Int) -> Unit,
-    onNo: () -> Unit,
-) {
-    val completed = repetitions >= target
-    Column {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            WaterAdjustButton("−", "Убавить одно отжимание", repetitions > 0) { onChange(repetitions - 1) }
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "$repetitions",
-                    color = if (completed) Acid else Paper,
-                    style = MaterialTheme.typography.displayMedium,
-                )
-                Text("из $target подряд", color = Muted, style = MaterialTheme.typography.bodyMedium)
-            }
-            WaterAdjustButton("+", "Добавить одно отжимание", repetitions < 100, strong = repetitions == target - 1) {
-                onChange(repetitions + 1)
-            }
-        }
-        if (!completed) {
-            Spacer(Modifier.height(12.dp))
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .clip(RoundedCornerShape(15.dp))
-                    .background(SurfaceSoft)
-                    .border(1.dp, Danger.copy(alpha = .55f), RoundedCornerShape(15.dp))
-                    .clickable(role = Role.Button, onClick = onNo),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("НЕ ВЫПОЛНЕНО", color = Danger, style = MaterialTheme.typography.labelLarge)
-            }
-        }
-    }
-}
-
-@Composable
-private fun AdmissionProgress(target: Int, level: Int, total: Int, completed: Boolean) {
-    Column {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-            Column {
-                Text("УРОВЕНЬ", color = Muted, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                Text("$level", color = Acid, style = MaterialTheme.typography.displayMedium)
-            }
-            Text("$target ПОДРЯД", color = Paper, style = MaterialTheme.typography.labelLarge)
-        }
-        Spacer(Modifier.height(10.dp))
-        Box(Modifier.fillMaxWidth().height(5.dp).background(Hairline, CircleShape)) {
-            val fraction = if (completed) 1f else level / total.toFloat()
-            val animated by animateFloatAsState(fraction, spring(stiffness = Spring.StiffnessLow), label = "admission")
-            Box(Modifier.fillMaxWidth(animated).fillMaxHeight().background(Acid, CircleShape))
-        }
-    }
-}
-
-@Composable
 private fun LightPlanProgress(plan: LightPlanState) {
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1824,12 +1763,6 @@ private fun LightPlanProgress(plan: LightPlanState) {
         Spacer(Modifier.height(12.dp))
         Text("Держи дискомфорт на уровне 3–5/10. Если он выше — повтори предыдущий этап.", color = Muted, style = MaterialTheme.typography.bodyMedium)
     }
-}
-
-private fun pushupWord(count: Int): String = when (count % 10) {
-    1 -> "отжимание"
-    2, 3, 4 -> "отжимания"
-    else -> "отжиманий"
 }
 
 @Composable
@@ -2231,11 +2164,6 @@ private fun HistoryScreen(
         HistoryDayScreen(
             date = date,
             record = repository.recordFor(date),
-            admissionTarget = SystemLogic.admissionFor(
-                date,
-                repository.settings.admissionStart,
-                repository.records.values,
-            ).target,
             lightPlan = SystemLogic.lightPlanFor(date, repository.settings.lightStart),
             onBack = { selectedDate = null },
             onSleepYes = {
@@ -2252,12 +2180,7 @@ private fun HistoryScreen(
             onMorningYes = {
                 if (SystemLogic.toggledDecision(repository.recordFor(date).morning, DecisionStatus.YES) == null) repository.clearMorning(date)
                 else {
-                    val target = SystemLogic.admissionFor(
-                        date,
-                        repository.settings.admissionStart,
-                        repository.records.values,
-                    ).target
-                    repository.setMorningRepetitions(date, target, target)
+                    repository.setMorning(date, DecisionStatus.YES)
                     onCelebrate(DecisionKind.MORNING)
                 }
             },
@@ -2519,7 +2442,6 @@ private fun CompactMetric(
 private fun HistoryDayScreen(
     date: LocalDate,
     record: DailyRecord,
-    admissionTarget: Int,
     lightPlan: LightPlanState,
     onBack: () -> Unit,
     onSleepYes: () -> Unit,
@@ -2548,7 +2470,7 @@ private fun HistoryDayScreen(
                 }
             }
         }
-        item { HistoryDecisionRow("УТРО", "$admissionTarget ${pushupWord(admissionTarget)} подряд", record.morning, onMorningYes, onMorningNo) }
+        item { HistoryDecisionRow("УТРО", "20 отжиманий", record.morning, onMorningYes, onMorningNo) }
         if (!lightPlan.completed) item {
             HistoryDecisionRow("СВЕТ", "День ${lightPlan.day}: ${lightPlan.task}", record.light, onLightYes, onLightNo)
         }
@@ -2606,7 +2528,6 @@ private fun PreviousDayReminderScreen(
 ) {
     val record = repository.recordFor(date)
     val missing = SystemLogic.missingTasks(record, SystemLogic.activeTasks(date, repository.settings))
-    val admission = SystemLogic.admissionFor(date, repository.settings.admissionStart, repository.records.values)
     val lightPlan = SystemLogic.lightPlanFor(date, repository.settings.lightStart)
 
     LaunchedEffect(missing.isEmpty()) {
@@ -2628,7 +2549,7 @@ private fun PreviousDayReminderScreen(
         missing.forEach { task ->
             item(task.name) {
                 val detail = when (task) {
-                    DailyTask.MORNING -> "${admission.target} ${pushupWord(admission.target)} подряд"
+                    DailyTask.MORNING -> "20 отжиманий"
                     DailyTask.LIGHT -> "День ${lightPlan.day}: ${lightPlan.task}"
                     DailyTask.DIET -> "Без сладкого и без чипсов"
                     DailyTask.WATER -> "2,5 литра за день"
@@ -2649,24 +2570,9 @@ private fun StatsScreen(
     repository: SystemRepository,
     hseMode: Boolean = false,
     onOpenHistory: (() -> Unit)? = null,
-    openWeeklyReport: Boolean = false,
-    onWeeklyReportOpened: () -> Unit = {},
+    onOpenWeeklyReview: () -> Unit,
 ) {
     val today = LocalDate.now()
-    var showWeeklyReport by remember { mutableStateOf(false) }
-    LaunchedEffect(openWeeklyReport) {
-        if (openWeeklyReport) {
-            showWeeklyReport = true
-            onWeeklyReportOpened()
-        }
-    }
-    if (showWeeklyReport) {
-        WeeklyReportScreen(
-            SystemLogic.weeklyReport(today, repository.records.values, repository.experimentFeedback),
-            onBack = { showWeeklyReport = false },
-        )
-        return
-    }
     val recentRecords = repository.records.values.filter {
         !it.date.isBefore(today.minusDays(29)) && !it.date.isAfter(today)
     }
@@ -2707,39 +2613,29 @@ private fun StatsScreen(
                 "Факты, данные и статистика.",
             )
         }
+        item {
+            HseActionButton(
+                label = "ВЫШКА: ОБЗОР НЕДЕЛИ",
+                color = if (hseMode) HseGold else Acid,
+                onClick = onOpenWeeklyReview,
+            )
+        }
         if (hseMode && onOpenHistory != null) {
             item {
                 PremiumCard(
                     modifier = Modifier.clickable(onClick = onOpenHistory),
-                    color = Color(0xFF0F1B25),
-                    border = Acid.copy(alpha = .28f),
+                    color = Color(0xFF111112),
+                    border = HseGold.copy(alpha = .34f),
                 ) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("ИСТОРИЯ ДИСЦИПЛИНЫ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
+                            Text("ИСТОРИЯ ДИСЦИПЛИНЫ", color = HseGold, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
                             Spacer(Modifier.height(7.dp))
                             Text("Открыть календарь", color = Paper, style = MaterialTheme.typography.titleLarge)
                             Text("Все пять личных задач по дням", color = Muted, style = MaterialTheme.typography.bodyMedium)
                         }
-                        Text("→", color = Acid, style = MaterialTheme.typography.headlineMedium)
+                        Text("→", color = HseGold, style = MaterialTheme.typography.headlineMedium)
                     }
-                }
-            }
-        }
-        item {
-            PremiumCard(
-                modifier = Modifier.clickable(onClick = { showWeeklyReport = true }),
-                color = Acid.copy(alpha = .065f),
-                border = Acid.copy(alpha = .38f),
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("НЕДЕЛЬНЫЙ ОТЧЁТ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                        Spacer(Modifier.height(7.dp))
-                        Text("Открыть картину недели", color = Paper, style = MaterialTheme.typography.titleLarge)
-                        Text("Выполнение, полнота, причины и один эксперимент", color = Muted, style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Text("→", color = Acid, style = MaterialTheme.typography.headlineMedium)
                 }
             }
         }
@@ -2768,106 +2664,6 @@ private fun StatsScreen(
                 Spacer(Modifier.height(5.dp))
                 Text("Один срыв не обнуляет прогресс. Система ищет повторяющуюся причину и возвращает к следующей задаче.", color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
-        }
-    }
-}
-
-@Composable
-private fun WeeklyReportScreen(report: WeeklyReport, onBack: () -> Unit) {
-    val period = "${report.weekStart.format(DateTimeFormatter.ofPattern("d MMM", Ru))} — ${report.weekEnd.format(DateTimeFormatter.ofPattern("d MMM", Ru))}"
-    LazyColumn(
-        Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(20.dp, 18.dp, 20.dp, 32.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                CircleTextButton("‹", "Назад", onBack)
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    Text("НЕДЕЛЬНЫЙ ОТЧЁТ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.6.sp)
-                    Text(period.uppercase(Ru), color = Muted, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-        }
-        item {
-            PremiumCard(color = SurfaceSoft, border = Acid.copy(alpha = .22f)) {
-                Text("ВЫПОЛНЕНИЕ", color = Muted, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(report.overall?.let { "$it%" } ?: "—", color = Paper, style = MaterialTheme.typography.displayLarge)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    when (report.overall) {
-                        null -> "На этой неделе ещё нет отметок."
-                        in 85..100 -> "Стандарт работает устойчиво."
-                        in 65..84 -> "Основа есть. Нужна точечная корректировка."
-                        else -> "Сейчас важнее восстановить управляемость, а не идеальность."
-                    },
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(20.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    report.metrics.take(2).forEach { metric ->
-                        CompactMetric(metric.label, metric.value, Modifier.weight(1f), coverage = "${metric.answered}/${metric.eligible}")
-                    }
-                }
-                Spacer(Modifier.height(14.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    report.metrics.drop(2).forEach { metric ->
-                        CompactMetric(metric.label, metric.value, Modifier.weight(1f), coverage = "${metric.answered}/${metric.eligible}")
-                    }
-                }
-            }
-        }
-        item {
-            PremiumCard {
-                Text("КАРТИНА НЕДЕЛИ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
-                Spacer(Modifier.height(18.dp))
-                ReportFact("Сильная сторона", report.strongest ?: "Недостаточно данных", Acid)
-                Spacer(Modifier.height(14.dp))
-                ReportFact("Зона внимания", report.weakest ?: "Недостаточно данных", Amber)
-                Spacer(Modifier.height(14.dp))
-                ReportFact("Частая причина", report.topReason ?: "Причины не зафиксированы", Danger)
-            }
-        }
-        item {
-            PremiumCard {
-                Text("НАБЛЮДЕНИЕ", color = Paper, style = MaterialTheme.typography.labelLarge, letterSpacing = 1.2.sp)
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    report.insight ?: "Для надёжной взаимосвязи нужно не меньше ${SystemLogic.MIN_CORRELATION_DAYS} сопоставимых дней.",
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-            }
-        }
-        item {
-            PremiumCard(color = Acid.copy(alpha = .09f), border = Acid.copy(alpha = .28f)) {
-                Text("ЗАДАЧА СЛЕДУЮЩЕЙ НЕДЕЛИ", color = Acid, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.4.sp)
-                Spacer(Modifier.height(10.dp))
-                Text(report.experiment.focus.title, color = Paper, style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(7.dp))
-                Text(report.experiment.focus.action, color = Muted, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(14.dp))
-                Text(report.experiment.basis, color = Muted, style = MaterialTheme.typography.labelMedium)
-                report.experimentFeedback?.let { feedback ->
-                    Spacer(Modifier.height(10.dp))
-                    Text("ИТОГ: ${feedback.label.uppercase(Ru)}", color = Acid, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReportFact(label: String, value: String, color: Color) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(8.dp).background(color, CircleShape))
-        Spacer(Modifier.width(11.dp))
-        Column {
-            Text(label.uppercase(Ru), color = Muted, style = MaterialTheme.typography.labelMedium)
-            Text(value, color = Paper, style = MaterialTheme.typography.titleMedium)
         }
     }
 }
@@ -2929,7 +2725,7 @@ private fun MetricRing(label: String, stat: com.personal.thesystem.model.Complia
             val compact = maxWidth < 110.dp
             val ringSize = if (compact) 62.dp else 112.dp
             Column(
-                Modifier.fillMaxWidth().height(if (compact) 92.dp else 142.dp),
+                Modifier.fillMaxWidth().height(if (compact) 108.dp else 154.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {

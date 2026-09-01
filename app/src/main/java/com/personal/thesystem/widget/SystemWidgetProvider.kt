@@ -55,11 +55,6 @@ class HseWidgetProvider : AppWidgetProvider() {
         ids.forEach { WidgetRenderer.hse(context, manager, it) }
 }
 
-class WeekWidgetProvider : AppWidgetProvider() {
-    override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) =
-        ids.forEach { WidgetRenderer.week(context, manager, it) }
-}
-
 private const val ACTION_WATER_PLUS = "com.personal.thesystem.widget.WATER_PLUS"
 private const val ACTION_WATER_MINUS = "com.personal.thesystem.widget.WATER_MINUS"
 private val Ru = Locale.forLanguageTag("ru")
@@ -70,7 +65,6 @@ private object WidgetRenderer {
         WaterWidgetProvider::class.java,
         FocusWidgetProvider::class.java,
         HseWidgetProvider::class.java,
-        WeekWidgetProvider::class.java,
     )
 
     fun updateAll(context: Context) {
@@ -83,7 +77,6 @@ private object WidgetRenderer {
                     WaterWidgetProvider::class.java -> water(context, manager, id, repository)
                     FocusWidgetProvider::class.java -> focus(context, manager, id, repository)
                     HseWidgetProvider::class.java -> hse(context, manager, id, repository)
-                    WeekWidgetProvider::class.java -> week(context, manager, id, repository)
                 }
             }
         }
@@ -154,22 +147,6 @@ private object WidgetRenderer {
                 setViewVisibility(R.id.hse_dot, View.INVISIBLE)
             }
             bindOpen(context, id + 60_000, this, "hse")
-        }
-        manager.updateAppWidget(id, views)
-    }
-
-    fun week(context: Context, manager: AppWidgetManager, id: Int, repository: SystemRepository = SystemRepository(context)) {
-        val report = SystemLogic.weeklyReport(LocalDate.now(), repository.records.values, repository.experimentFeedback)
-        val values = report.metrics.map { it.value?.let { value -> "$value%" } ?: "—" }
-        val views = RemoteViews(context.packageName, R.layout.widget_week).apply {
-            setTextViewText(R.id.week_overall, report.overall?.let { "$it%" } ?: "—")
-            setTextViewText(R.id.week_morning, values[0])
-            setTextViewText(R.id.week_light, values[1])
-            setTextViewText(R.id.week_diet, values[2])
-            setTextViewText(R.id.week_water, values[3])
-            setTextViewText(R.id.week_sleep, values[4])
-            setTextViewText(R.id.week_decision, report.weakest?.let { "ФОКУС · $it" } ?: "НЕДЕЛЯ ТОЛЬКО НАЧАЛАСЬ")
-            bindOpen(context, id + 70_000, this, "week")
         }
         manager.updateAppWidget(id, views)
     }
